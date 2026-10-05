@@ -5,3 +5,4 @@ langchain-community
 langchain-chroma
 sentence-transformers
 pypdf
+langchain-huggingface
