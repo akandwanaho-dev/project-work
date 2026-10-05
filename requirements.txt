@@ -6,3 +6,4 @@ langchain-chroma
 sentence-transformers
 pypdf
 langchain-huggingface
+langchain-groq
