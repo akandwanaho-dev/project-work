@@ -6,4 +6,7 @@ faiss-cpu
 langchain-huggingface
 langchain-groq
 langchain-core
-sentence-transformers
+langchain-text-splitters
+pypdf
+transformers
+torch
