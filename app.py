@@ -8,19 +8,12 @@ from langchain_core.runnables import RunnablePassthrough
 # ==========================================================
 # 1. SETUP FREE HUGGING FACE INFERENCE ENGINE
 # ==========================================================
-def load_huggingface_llm():
+def load_huggingface_llm(hf_token):
     """
-    Initializes a free serverless LLM endpoint from Hugging Face Hub.
+    Initializes a free serverless LLM endpoint from Hugging Face Hub using the provided token.
     """
-    # Safely extract your key from Streamlit Cloud Secrets
-    hf_token = st.secrets.get("HF_TOKEN")
-    
-    if not hf_token:
-        st.error("🔑 **HF_TOKEN Missing:** Please add your Hugging Face token to your Streamlit App Secrets.")
-        st.stop()
-
     try:
-        # We use Llama-3.1-8B-Instruct because it offers excellent reasoning constraints for RAG pipelines
+        # Using Llama-3.1-8B-Instruct for excellent RAG compliance
         llm_endpoint = HuggingFaceEndpoint(
             repo_id="meta-llama/Meta-Llama-3.1-8B-Instruct",
             task="text-generation",
@@ -29,26 +22,20 @@ def load_huggingface_llm():
             huggingfacehub_api_token=hf_token,
             timeout=30
         )
-        
-        # Wrap it in ChatHuggingFace so it formats multi-turn chat dialogues correctly
+        # Wrap it in ChatHuggingFace for correct multi-turn conversation formatting
         return ChatHuggingFace(llm=llm_endpoint)
-        
     except Exception as e:
-        st.error(f"Failed to connect to Hugging Face endpoint: {e}")
-        st.stop()
+        st.error(f"⚠️ Error initializing Hugging Face model connection: {e}")
+        return None
 
 # ==========================================================
-# 2. YOUR VECTOR DATABASE RETRIEVER INTERFACE
+# 2. VECTOR DATABASE RETRIEVER INTERFACE
 # ==========================================================
 def initialize_retriever():
     """
     Loads your document knowledge base retriever.
     NOTE: Replace the fallback class below with your actual FAISS/Chroma database tool!
     """
-    # EXAMPLE SWAP:
-    # db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
-    # return db.as_retriever(search_kwargs={"k": 3})
-    
     class LocalMockRetriever:
         def invoke(self, query):
             return "ISCC Uganda Grand Championship Finals and Innovation Bootcamp are scheduled for December."
@@ -75,7 +62,6 @@ def build_rag_pipeline(llm, retriever):
         ("human", "{input}")
     ])
     
-    # Executable analytical flow map
     chain = (
         {"context": retriever | RunnablePassthrough(), "input": RunnablePassthrough()}
         | prompt_template
@@ -85,18 +71,30 @@ def build_rag_pipeline(llm, retriever):
     return chain
 
 # ==========================================================
-# 4. STREAMLIT APPLICATION SURFACE
+# 4. STREAMLIT APPLICATION SURFACE (UI Elements Always Render)
 # ==========================================================
 st.set_page_config(page_title="ISCC AI Bot", page_icon="⚡", layout="centered")
 st.title("⚡ Competition RAG Chatbot")
 st.caption("Powered by Hugging Face Hub Serverless APIs & LangChain")
 
-# Instantiate and cache components inside Streamlit's global session state
-if "rag_chain" not in st.session_state:
+# --- Security & Token Validation Gate ---
+# Safely pull key from Streamlit Cloud Secrets without crashing the execution runtime
+hf_token = st.secrets.get("HF_TOKEN")
+api_is_valid = False
+
+if not hf_token or hf_token.strip() == "":
+    # Warning box displayed at the top of the UI
+    st.warning("⚠️ **System Configuration Alert:** The `HF_TOKEN` API key is missing. Please navigate to your App Settings -> Secrets panel on Streamlit Cloud to add it. Chat capabilities are currently locked.")
+else:
+    api_is_valid = True
+
+# Instantiate and cache components inside Streamlit's global session state if key exists
+if api_is_valid and "rag_chain" not in st.session_state:
     with st.spinner("Initializing Hugging Face model environment..."):
-        chat_llm = load_huggingface_llm()
-        data_retriever = initialize_retriever()
-        st.session_state.rag_chain = build_rag_pipeline(chat_llm, data_retriever)
+        chat_llm = load_huggingface_llm(hf_token)
+        if chat_llm:
+            data_retriever = initialize_retriever()
+            st.session_state.rag_chain = build_rag_pipeline(chat_llm, data_retriever)
 
 # Persistent Chat Log History Array
 if "messages" not in st.session_state:
@@ -107,25 +105,30 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# User prompt field detection
-if user_query := st.chat_input("Ask something about the competition files..."):
-    
-    # 1. Show user message
+# --- Conditional Input Lock ---
+# If api_is_valid is True, it presents a standard input field.
+# If False, passing a string to the `placeholder` and `disabled=True` freezes the input.
+if api_is_valid:
+    user_query = st.chat_input("Ask something about the competition files...")
+else:
+    user_query = st.chat_input("Chat disabled — missing API Configuration Token", disabled=True)
+
+# 5. Process user prompt if available
+if user_query:
+    # Show user message
     st.session_state.messages.append({"role": "user", "content": user_query})
     with st.chat_message("user"):
         st.markdown(user_query)
         
-    # 2. Execute RAG pipeline safely
+    # Execute RAG pipeline safely
     with st.chat_message("assistant"):
         with st.spinner("Searching document layers..."):
             try:
-                # Running the new safe hugging face engine loop
-                response = st.session_state.rag_chain.invoke(user_query)
-                st.markdown(response)
-                
-                # Append to history state
-                st.session_state.messages.append({"role": "assistant", "content": response})
-                
+                if "rag_chain" in st.session_state:
+                    response = st.session_state.rag_chain.invoke(user_query)
+                    st.markdown(response)
+                    st.session_state.messages.append({"role": "assistant", "content": response})
+                else:
+                    st.error("RAG pipeline failed to initialize properly. Please check logs.")
             except Exception as e:
                 st.error(f"Pipeline error running Hugging Face model: {e}")
-                st.info("💡 Tip: Verify your HF_TOKEN permissions or network rate-limits on Hugging Face console.")
