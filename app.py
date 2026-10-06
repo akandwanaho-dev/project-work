@@ -86,7 +86,39 @@ st.markdown("""
 .source-card{border:1px solid rgba(128,128,128,.18);border-radius:14px;padding:.8rem;margin:.35rem 0;background:rgba(128,128,128,.04)}
 .small-muted{opacity:.7;font-size:.88rem}
 [data-testid="stChatMessage"]{border:1px solid rgba(128,128,128,.10);border-radius:18px;padding:.45rem .65rem;margin-bottom:.55rem;background:rgba(128,128,128,.018)}
-[data-testid="stChatInput"]{border-radius:18px}
+
+/* ---------- ChatGPT-style fixed composer ---------- */
+/* Streamlit already treats st.chat_input as a bottom composer. These rules
+   make the behavior visually consistent and keep it above the page content. */
+[data-testid="stChatInput"]{
+    position:fixed !important;
+    left:clamp(18rem, 22vw, 24rem) !important;
+    right:1.5rem !important;
+    bottom:1rem !important;
+    z-index:999 !important;
+    border-radius:18px !important;
+    padding:0 !important;
+    background:transparent !important;
+}
+[data-testid="stChatInput"] > div{
+    border-radius:20px !important;
+    border:1px solid rgba(128,128,128,.24) !important;
+    background:var(--background-color, #17181c) !important;
+    box-shadow:0 8px 30px rgba(0,0,0,.24), 0 1px 3px rgba(0,0,0,.12) !important;
+}
+[data-testid="stChatInput"] textarea{
+    min-height:48px !important;
+    max-height:180px !important;
+    padding:13px 52px 13px 16px !important;
+    font-size:.98rem !important;
+}
+[data-testid="stChatInput"] button{
+    border-radius:12px !important;
+}
+/* Keep the conversation from being hidden behind the fixed composer. */
+[data-testid="stAppViewContainer"] .main .block-container{
+    padding-bottom:7rem !important;
+}
 .stButton button{border-radius:11px}
 [data-testid="stMetric"]{border:1px solid rgba(128,128,128,.12);border-radius:14px;padding:.7rem;background:rgba(128,128,128,.025)}
 </style>
