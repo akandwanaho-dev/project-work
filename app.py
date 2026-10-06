@@ -3,7 +3,7 @@ import streamlit as st
 from langchain_huggingface import HuggingFaceEndpoint, ChatHuggingFace
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
+from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 
 # ==========================================================
 # 1. SETUP FREE HUGGING FACE INFERENCE ENGINE
@@ -34,13 +34,15 @@ def load_huggingface_llm(hf_token):
 def initialize_retriever():
     """
     Loads your document knowledge base retriever.
-    NOTE: Replace the fallback class below with your actual FAISS/Chroma database tool!
+    NOTE: Replace this with your actual FAISS/Chroma database tool!
     """
-    class LocalMockRetriever:
-        def invoke(self, query):
-            return "ISCC Uganda Grand Championship Finals and Innovation Bootcamp are scheduled for December."
+    def mock_retrieve(query: str):
+        # Your actual vector DB will return a list of Documents; 
+        # this mock returns a raw string for compatibility with your template.
+        return "ISCC Uganda Grand Championship Finals and Innovation Bootcamp are scheduled for December."
             
-    return LocalMockRetriever()
+    # Wrap it in a RunnableLambda so LangChain operators (|) work seamlessly
+    return RunnableLambda(mock_retrieve)
 
 # ==========================================================
 # 3. BUILD THE RAG DATA CHAIN
@@ -62,8 +64,12 @@ def build_rag_pipeline(llm, retriever):
         ("human", "{input}")
     ])
     
+    # FIX: Correct entry-point map configuration for LCEL
     chain = (
-        {"context": retriever | RunnablePassthrough(), "input": RunnablePassthrough()}
+        {
+            "context": retriever, 
+            "input": RunnablePassthrough()
+        }
         | prompt_template
         | llm
         | StrOutputParser()
@@ -78,12 +84,10 @@ st.title("⚡ Competition RAG Chatbot")
 st.caption("Powered by Hugging Face Hub Serverless APIs & LangChain")
 
 # --- Security & Token Validation Gate ---
-# Safely pull key from Streamlit Cloud Secrets without crashing the execution runtime
 hf_token = st.secrets.get("HF_TOKEN")
 api_is_valid = False
 
 if not hf_token or hf_token.strip() == "":
-    # Warning box displayed at the top of the UI
     st.warning("⚠️ **System Configuration Alert:** The `HF_TOKEN` API key is missing. Please navigate to your App Settings -> Secrets panel on Streamlit Cloud to add it. Chat capabilities are currently locked.")
 else:
     api_is_valid = True
@@ -106,8 +110,6 @@ for msg in st.session_state.messages:
         st.markdown(msg["content"])
 
 # --- Conditional Input Lock ---
-# If api_is_valid is True, it presents a standard input field.
-# If False, passing a string to the `placeholder` and `disabled=True` freezes the input.
 if api_is_valid:
     user_query = st.chat_input("Ask something about the competition files...")
 else:
