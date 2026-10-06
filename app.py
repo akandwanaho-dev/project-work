@@ -132,11 +132,13 @@ with st.sidebar:
                     retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
                     
                     # Instantiate Groq Engine with the UI-provided API Key
+                    # Change this model identifier to a currently supported production endpoint
                     llm = ChatGroq(
-                        model="llama3-8b-8192", 
+                        model="llama-3.1-8b-instant",  # Updated from llama3-8b-8192
                         temperature=0.2,
                         groq_api_key=user_api_key
                     )
+
                     
                     # Construct Prompt Engineering blue-print matrices
                     system_prompt = (
