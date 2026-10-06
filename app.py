@@ -1256,13 +1256,13 @@ with tabs[5]:
 
     st.markdown("#### Streamlit Secrets")
     st.code(
-        '''HF_TOKEN = "hf_your_token_here"
-# Optional:
-HF_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
-TAVILY_API_KEY = "tvly_your_key_here"''',
-        language="toml",
-    )
+       HF_TOKEN = "hf_your_actual_token"
 
+        # Optional
+        HF_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
+        
+        # Optional — only needed for web research
+        TAVILY_API_KEY = "tvly_your_key"
     st.warning(
         "Do not place API keys directly inside `app.py` or commit them to GitHub."
     )
