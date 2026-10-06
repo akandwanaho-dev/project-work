@@ -49,14 +49,46 @@ SUBJECTS = {
 
 st.markdown("""
 <style>
-.block-container{max-width:1500px;padding-top:1.2rem;padding-bottom:2rem}
-[data-testid="stSidebar"]{border-right:1px solid rgba(128,128,128,.2)}
-.hero{padding:1.35rem 1.5rem;border:1px solid rgba(128,128,128,.18);border-radius:24px;background:linear-gradient(135deg,rgba(100,90,255,.14),rgba(0,190,160,.08));margin-bottom:1rem}
-.hero h1{margin:0;font-size:2rem}.hero p{margin:.35rem 0 0;opacity:.8}
+/* ---------- Global ---------- */
+.block-container{max-width:1450px;padding-top:1.25rem;padding-bottom:2.5rem}
+[data-testid="stSidebar"]{border-right:1px solid rgba(128,128,128,.16)}
+[data-testid="stSidebar"] > div:first-child{padding:1rem .8rem 1.2rem}
+[data-testid="stSidebar"] .block-container{padding:0}
+[data-testid="stSidebar"] hr{margin:.8rem 0;border-color:rgba(128,128,128,.14)}
+
+/* ---------- Sidebar ---------- */
+.sidebar-brand{display:flex;align-items:center;gap:.7rem;padding:.45rem .35rem .2rem}
+.sidebar-logo{width:42px;height:42px;border-radius:13px;display:flex;align-items:center;justify-content:center;font-size:1.45rem;background:linear-gradient(135deg,rgba(255,255,255,.12),rgba(120,100,255,.22));border:1px solid rgba(255,255,255,.10);box-shadow:0 8px 22px rgba(0,0,0,.10)}
+.sidebar-title{font-size:1.12rem;font-weight:750;line-height:1.1}
+.sidebar-subtitle{font-size:.74rem;opacity:.58;margin-top:.16rem}
+.status-pill{display:flex;align-items:center;gap:.45rem;margin:.8rem .2rem .45rem;padding:.48rem .65rem;border-radius:10px;font-size:.78rem;border:1px solid rgba(128,128,128,.16);background:rgba(128,128,128,.055)}
+.status-dot{width:8px;height:8px;border-radius:50%;background:#2ecc71;box-shadow:0 0 0 3px rgba(46,204,113,.12)}
+.status-dot.off{background:#f39c12;box-shadow:0 0 0 3px rgba(243,156,18,.12)}
+.status-text{font-weight:650}
+.sidebar-section-label{text-transform:uppercase;letter-spacing:.08em;font-size:.67rem;font-weight:750;opacity:.52;margin:.95rem .35rem .4rem}
+.sidebar-help{font-size:.73rem;line-height:1.4;opacity:.58;margin:.45rem .25rem}
+.sidebar-count{float:right;opacity:.55;font-weight:600}
+
+/* Make sidebar buttons compact and consistent */
+[data-testid="stSidebar"] .stButton>button{width:100%;border-radius:10px;min-height:2.25rem;padding:.35rem .65rem;font-weight:600;border:1px solid rgba(128,128,128,.16);background:rgba(128,128,128,.045)}
+[data-testid="stSidebar"] .stButton>button:hover{border-color:rgba(120,100,255,.45);background:rgba(120,100,255,.08)}
+[data-testid="stSidebar"] .stTextInput input,[data-testid="stSidebar"] .stSelectbox div[data-baseweb="select"]>div{border-radius:10px}
+[data-testid="stSidebar"] [data-testid="stFileUploader"]{border:1px dashed rgba(128,128,128,.25);border-radius:12px;padding:.15rem}
+[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"]{background:transparent}
+[data-testid="stSidebar"] [data-testid="stExpander"]{border:1px solid rgba(128,128,128,.14);border-radius:11px;background:rgba(128,128,128,.025)}
+
+/* ChatGPT-like recent chat buttons */
+.chat-row button{font-size:.82rem;text-align:left}
+
+/* ---------- Main ---------- */
+.hero{padding:1.5rem 1.65rem;border:1px solid rgba(128,128,128,.18);border-radius:24px;background:linear-gradient(135deg,rgba(100,90,255,.14),rgba(0,190,160,.07));margin-bottom:1rem;box-shadow:0 10px 35px rgba(0,0,0,.05)}
+.hero h1{margin:0;font-size:2rem;letter-spacing:-.03em}.hero p{margin:.4rem 0 0;opacity:.72;max-width:850px;line-height:1.5}
 .source-card{border:1px solid rgba(128,128,128,.18);border-radius:14px;padding:.8rem;margin:.35rem 0;background:rgba(128,128,128,.04)}
 .small-muted{opacity:.7;font-size:.88rem}
-[data-testid="stChatMessage"]{border:1px solid rgba(128,128,128,.10);border-radius:18px;padding:.35rem .55rem;margin-bottom:.45rem}
-.stButton button{border-radius:12px}
+[data-testid="stChatMessage"]{border:1px solid rgba(128,128,128,.10);border-radius:18px;padding:.45rem .65rem;margin-bottom:.55rem;background:rgba(128,128,128,.018)}
+[data-testid="stChatInput"]{border-radius:18px}
+.stButton button{border-radius:11px}
+[data-testid="stMetric"]{border:1px solid rgba(128,128,128,.12);border-radius:14px;padding:.7rem;background:rgba(128,128,128,.025)}
 </style>
 """, unsafe_allow_html=True)
 
@@ -387,59 +419,112 @@ def tavily_search(query):
 # SIDEBAR
 # ============================================================
 with st.sidebar:
-    st.markdown("## 📚 Textbook AI")
-    st.caption("Your textbook RAG study workspace")
+    # Brand
+    st.markdown("""
+    <div class="sidebar-brand">
+        <div class="sidebar-logo">📚</div>
+        <div>
+            <div class="sidebar-title">Textbook AI</div>
+            <div class="sidebar-subtitle">Your personal study workspace</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
     token_ready = bool(secret("HF_TOKEN"))
-    st.success("AI connection ready", icon="✅") if token_ready else st.warning("Add HF_TOKEN in Secrets", icon="🔑")
+    if token_ready:
+        st.markdown('<div class="status-pill"><span class="status-dot"></span><span class="status-text">AI connection ready</span></div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="status-pill"><span class="status-dot off"></span><span class="status-text">Add HF_TOKEN in Secrets</span></div>', unsafe_allow_html=True)
 
-    st.divider()
-    st.markdown("### Library")
-    uploads = st.file_uploader("Upload textbooks", type=["pdf", "docx", "txt", "md"], accept_multiple_files=True)
-    if st.button("📥 Index uploaded files", use_container_width=True, disabled=not uploads):
-        try:
-            n = index_uploads(uploads)
-            st.success(f"Indexed {n} new textbook(s)." if n else "No new files to index.")
-        except Exception as e:
-            st.error(f"Indexing error: {e}")
-
-    for name, meta in list(st.session_state.books.items()):
-        with st.expander(f"📘 {name}"):
-            st.caption(f"{meta['size_mb']} MB • {meta['pages']} pages/sections • {meta['chunks']} chunks")
-            st.caption(f"Uploaded {meta['uploaded']}")
-            if st.button("Remove", key=f"rm_{meta['hash']}", use_container_width=True):
-                remove_book(name)
-                st.rerun()
-
-    st.divider()
-    st.markdown("### Chats")
-    new_name = st.text_input("New chat name", placeholder="e.g. Organic Chemistry")
-    if st.button("➕ Create chat", use_container_width=True):
-        name = new_name.strip() or f"Chat {len(st.session_state.chat_sessions)+1}"
-        st.session_state.chat_sessions.setdefault(name, [])
+    # New chat — the primary sidebar action
+    if st.button("＋  New chat", key="new_chat_primary", use_container_width=True):
+        name = f"Chat {len(st.session_state.chat_sessions) + 1}"
+        st.session_state.chat_sessions[name] = []
         st.session_state.active_chat = name
         st.session_state.messages = st.session_state.chat_sessions[name]
         st.rerun()
 
-    chat_names = list(st.session_state.chat_sessions)
-    idx = chat_names.index(st.session_state.active_chat) if st.session_state.active_chat in chat_names else 0
-    chosen = st.selectbox("Open chat", chat_names, index=idx)
-    if chosen != st.session_state.active_chat:
-        st.session_state.active_chat = chosen
-        st.session_state.messages = st.session_state.chat_sessions[chosen]
-        st.rerun()
+    st.divider()
 
-    if st.button("🗑️ Clear current chat", use_container_width=True):
-        st.session_state.chat_sessions[st.session_state.active_chat] = []
-        st.session_state.messages = st.session_state.chat_sessions[st.session_state.active_chat]
-        st.rerun()
+    # Recent chats
+    st.markdown('<div class="sidebar-section-label">Recent chats</div>', unsafe_allow_html=True)
+    chat_names = list(st.session_state.chat_sessions.keys())
+    if not chat_names:
+        st.caption("No conversations yet.")
+    else:
+        for chat_name in chat_names[-8:][::-1]:
+            is_active = chat_name == st.session_state.active_chat
+            label = ("●  " if is_active else "○  ") + chat_name
+            if st.button(label, key=f"chat_open_{hashlib.md5(chat_name.encode()).hexdigest()}", use_container_width=True):
+                st.session_state.active_chat = chat_name
+                st.session_state.messages = st.session_state.chat_sessions[chat_name]
+                st.rerun()
+
+    with st.expander("＋ Name a new chat", expanded=False):
+        new_name = st.text_input("Chat name", placeholder="e.g. Organic Chemistry", key="new_chat_name", label_visibility="collapsed")
+        if st.button("Create chat", key="create_named_chat", use_container_width=True):
+            name = new_name.strip() or f"Chat {len(st.session_state.chat_sessions)+1}"
+            st.session_state.chat_sessions.setdefault(name, [])
+            st.session_state.active_chat = name
+            st.session_state.messages = st.session_state.chat_sessions[name]
+            st.rerun()
+
+    if st.session_state.chat_sessions:
+        if st.button("Clear current chat", key="clear_chat", use_container_width=True):
+            st.session_state.chat_sessions[st.session_state.active_chat] = []
+            st.session_state.messages = st.session_state.chat_sessions[st.session_state.active_chat]
+            st.rerun()
 
     st.divider()
-    st.markdown("### Model settings")
-    model = st.text_input("Hugging Face chat model", value=secret("HF_MODEL", DEFAULT_LLM_MODEL) or DEFAULT_LLM_MODEL)
-    temperature = st.slider("Creativity", 0.0, 1.0, .35, .05)
-    answer_length = st.selectbox("Answer length", ["Short", "Medium", "Detailed"], index=1)
-    teaching_level = st.selectbox("Student level", ["Beginner", "Secondary School", "Advanced"], index=1)
+
+    # Library
+    book_count = len(st.session_state.books)
+    st.markdown(f'<div class="sidebar-section-label">Textbook library <span class="sidebar-count">{book_count}</span></div>', unsafe_allow_html=True)
+    with st.expander("📥  Add textbooks", expanded=book_count == 0):
+        uploads = st.file_uploader(
+            "Upload PDF, DOCX, TXT or Markdown files",
+            type=["pdf", "docx", "txt", "md"],
+            accept_multiple_files=True,
+            key="textbook_uploader",
+        )
+        if uploads:
+            st.caption(f"{len(uploads)} file(s) selected")
+        if st.button("Index textbooks", key="index_textbooks", use_container_width=True, disabled=not uploads):
+            try:
+                with st.spinner("Building textbook index..."):
+                    n = index_uploads(uploads)
+                st.success(f"Indexed {n} new textbook(s)." if n else "No new files to index.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Indexing error: {e}")
+
+    if st.session_state.books:
+        for name, meta in list(st.session_state.books.items()):
+            with st.expander(f"📘  {name}", expanded=False):
+                st.caption(f"{meta['size_mb']} MB  •  {meta['pages']} pages/sections")
+                st.caption(f"{meta['chunks']} indexed passages")
+                st.caption(f"Added {meta['uploaded']}")
+                if st.button("Remove textbook", key=f"rm_{meta['hash']}", use_container_width=True):
+                    remove_book(name)
+                    st.rerun()
+    else:
+        st.markdown('<div class="sidebar-help">Upload your school textbooks here. The AI will search them before answering.</div>', unsafe_allow_html=True)
+
+    st.divider()
+
+    # Settings
+    st.markdown('<div class="sidebar-section-label">Preferences</div>', unsafe_allow_html=True)
+    with st.expander("⚙️  Model & answer settings", expanded=False):
+        model = st.text_input(
+            "Hugging Face chat model",
+            value=secret("HF_MODEL", DEFAULT_LLM_MODEL) or DEFAULT_LLM_MODEL,
+            key="hf_model_setting",
+        )
+        temperature = st.slider("Creativity", 0.0, 1.0, .35, .05, key="temperature_setting")
+        answer_length = st.selectbox("Answer length", ["Short", "Medium", "Detailed"], index=1, key="answer_length_setting")
+        teaching_level = st.selectbox("Student level", ["Beginner", "Secondary School", "Advanced"], index=1, key="teaching_level_setting")
+
+    st.markdown('<div class="sidebar-help">🔒 API keys stay in Streamlit Secrets. Never paste them directly into this file.</div>', unsafe_allow_html=True)
 
 # ============================================================
 # MAIN
@@ -498,7 +583,7 @@ with tab_chat:
         if st.session_state.get("voice_transcript"):
             st.code(st.session_state.voice_transcript)
 
-    prompt = st.chat_input("Ask about your textbooks...", accept_file=True, file_type=["png","jpg","jpeg","pdf"], disabled=not token_ready)
+    prompt = st.chat_input("Ask about your textbooks...", accept_file=True, file_type=["png","jpg","jpeg"], disabled=not token_ready)
     if prompt:
         if isinstance(prompt, str):
             query, attached = prompt, []
