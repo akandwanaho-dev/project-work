@@ -1,154 +1,81 @@
-from pathlib import Path
-
-app_code = r'''
-import os
 import io
+import os
 import re
 import json
-import math
-import time
 import hashlib
-from datetime import datetime
 from collections import defaultdict
+from datetime import datetime
 
-import streamlit as st
 import pandas as pd
-from pypdf import PdfReader
+import requests
+import streamlit as st
 from docx import Document as DocxDocument
 from huggingface_hub import InferenceClient
+from pypdf import PdfReader
 from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # ============================================================
-# PAGE CONFIG
+# CONFIG
 # ============================================================
-st.set_page_config(
-    page_title="Textbook AI",
-    page_icon="📚",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+st.set_page_config(page_title="Textbook AI", page_icon="📚", layout="wide")
 
-# ============================================================
-# CONSTANTS
-# ============================================================
 DEFAULT_LLM_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 DEFAULT_EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 DEFAULT_ASR_MODEL = "openai/whisper-large-v3-turbo"
 
-SUPPORTED_TEXTBOOK_TYPES = ["pdf", "docx", "txt", "md"]
-
 STUDY_MODES = {
-    "Normal Tutor": "Answer clearly and accurately. Explain enough for the student to understand.",
-    "Explain Simply": "Explain in very simple language, use analogies, and avoid unnecessary jargon.",
-    "Exam Mode": "Give an exam-ready answer with definition, key points, examples, and an exam tip.",
-    "Summarize": "Give a concise but complete summary using headings and bullet points.",
-    "Quiz Me": "Teach briefly, then end with 3 short questions for the student to answer.",
-    "Flashcards": "Turn the answer into short question-and-answer flashcards.",
-    "Revision Notes": "Produce organized revision notes with headings, definitions, key facts, and memory aids.",
-    "Homework Helper": "Guide the student step by step. Show reasoning and method, not just the final result.",
-    "Math Solver": "Show givens, formula, substitution, working, units, and final answer step by step.",
+    "Normal Tutor": "Explain clearly and accurately with useful examples.",
+    "Explain Simply": "Use simple language, analogies, and short steps.",
+    "Exam Mode": "Give an exam-ready definition, key points, examples, and an exam tip.",
+    "Summarize": "Give a concise structured summary.",
+    "Quiz Me": "Teach briefly, then end with three questions.",
+    "Flashcards": "Present the answer as compact question-and-answer flashcards.",
+    "Revision Notes": "Create revision notes with headings, definitions, facts, and memory aids.",
+    "Homework Helper": "Guide step by step and explain the method.",
+    "Math Solver": "Show givens, formula, substitution, working, units, and final answer.",
 }
 
-SUBJECT_PERSONAS = {
+SUBJECTS = {
     "General": "You are an excellent multidisciplinary textbook tutor.",
-    "Biology": "You are a biology tutor. Emphasize structure, function, process, importance, and examples.",
-    "Chemistry": "You are a chemistry tutor. Show equations where useful and explain observations and chemical reasoning.",
-    "Physics": "You are a physics tutor. Define quantities, show formulas, units, substitutions, and interpretations.",
-    "Mathematics": "You are a mathematics tutor. Show complete working clearly and check the final answer.",
-    "Computer Science": "You are a computer science tutor. Explain concepts clearly and use small code examples when useful.",
+    "Biology": "You are a biology tutor. Emphasize structure, function, processes, importance, and examples.",
+    "Chemistry": "You are a chemistry tutor. Use balanced equations and explain observations when useful.",
+    "Physics": "You are a physics tutor. Show formulas, substitutions, units, and interpretations.",
+    "Mathematics": "You are a mathematics tutor. Show complete working and check answers.",
+    "Computer Science": "You are a computer science tutor. Explain concepts and use small code examples when useful.",
 }
 
-# ============================================================
-# GLOBAL CSS
-# ============================================================
-st.markdown(
-    """
-    <style>
-    :root {
-        --radius: 18px;
-    }
-    .block-container {
-        padding-top: 1.3rem;
-        padding-bottom: 2rem;
-        max-width: 1500px;
-    }
-    [data-testid="stSidebar"] {
-        border-right: 1px solid rgba(128,128,128,.18);
-    }
-    .hero {
-        padding: 1.35rem 1.5rem;
-        border: 1px solid rgba(128,128,128,.18);
-        border-radius: 24px;
-        background: linear-gradient(135deg, rgba(92,94,255,.13), rgba(0,200,170,.08));
-        margin-bottom: 1rem;
-    }
-    .hero h1 {
-        margin: 0;
-        font-size: 2rem;
-    }
-    .hero p {
-        margin: .35rem 0 0 0;
-        opacity: .82;
-    }
-    .metric-card {
-        border: 1px solid rgba(128,128,128,.18);
-        border-radius: 18px;
-        padding: 1rem;
-        min-height: 110px;
-    }
-    .source-card {
-        border: 1px solid rgba(128,128,128,.18);
-        border-radius: 14px;
-        padding: .75rem .9rem;
-        margin: .35rem 0;
-        background: rgba(128,128,128,.04);
-    }
-    .small-muted {
-        opacity: .72;
-        font-size: .88rem;
-    }
-    .book-chip {
-        display:inline-block;
-        padding:.28rem .58rem;
-        border-radius:999px;
-        border:1px solid rgba(128,128,128,.22);
-        margin:.15rem .2rem .15rem 0;
-        font-size:.82rem;
-    }
-    .stButton button {
-        border-radius: 12px;
-    }
-    [data-testid="stChatMessage"] {
-        border-radius: 18px;
-        border: 1px solid rgba(128,128,128,.10);
-        padding: .35rem .55rem;
-        margin-bottom: .45rem;
-    }
-    div[data-testid="stExpander"] {
-        border-radius: 14px;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+st.markdown("""
+<style>
+.block-container{max-width:1500px;padding-top:1.2rem;padding-bottom:2rem}
+[data-testid="stSidebar"]{border-right:1px solid rgba(128,128,128,.2)}
+.hero{padding:1.35rem 1.5rem;border:1px solid rgba(128,128,128,.18);border-radius:24px;background:linear-gradient(135deg,rgba(100,90,255,.14),rgba(0,190,160,.08));margin-bottom:1rem}
+.hero h1{margin:0;font-size:2rem}.hero p{margin:.35rem 0 0;opacity:.8}
+.source-card{border:1px solid rgba(128,128,128,.18);border-radius:14px;padding:.8rem;margin:.35rem 0;background:rgba(128,128,128,.04)}
+.small-muted{opacity:.7;font-size:.88rem}
+[data-testid="stChatMessage"]{border:1px solid rgba(128,128,128,.10);border-radius:18px;padding:.35rem .55rem;margin-bottom:.45rem}
+.stButton button{border-radius:12px}
+</style>
+""", unsafe_allow_html=True)
 
 # ============================================================
-# SESSION STATE
+# STATE
 # ============================================================
 def init_state():
     defaults = {
-        "books": {},                  # name -> metadata
-        "documents": [],              # chunked LangChain docs
+        "books": {},
+        "documents": [],
         "vectorstore": None,
         "messages": [],
         "chat_sessions": {"New Chat": []},
         "active_chat": "New Chat",
         "quiz": [],
+        "quiz_answers": [],
         "quiz_submitted": False,
         "flashcards": [],
+        "last_search_results": [],
         "progress": {
             "questions_asked": 0,
             "quizzes_taken": 0,
@@ -156,648 +83,350 @@ def init_state():
             "quiz_total": 0,
             "topics": defaultdict(int),
         },
-        "last_sources": [],
-        "last_search_results": [],
-        "notice": "",
     }
-    for key, value in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
 
 init_state()
 
 # ============================================================
-# UTILITIES
+# HELPERS
 # ============================================================
-def get_secret(name, default=""):
+def secret(name, default=""):
     try:
         return st.secrets.get(name, default)
     except Exception:
         return os.getenv(name, default)
 
-def safe_filename(name: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9._ -]", "_", name).strip()
 
-def file_hash(data: bytes) -> str:
+def sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
-def clean_text(text: str) -> str:
-    text = text.replace("\x00", " ")
+
+def clean(text: str) -> str:
+    text = (text or "").replace("\x00", " ")
     text = re.sub(r"\r\n?", "\n", text)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
-def detect_chapter(text: str, fallback="Unknown chapter"):
-    candidates = [
+
+def safe_name(name: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9._ -]", "_", name).strip()
+
+
+def chapter_from(text, fallback="Unknown chapter"):
+    for p in [
         r"(?im)^\s*(chapter\s+\d+(?:\.\d+)?\s*[:\-–]?\s*[^\n]{0,90})",
         r"(?im)^\s*(unit\s+\d+(?:\.\d+)?\s*[:\-–]?\s*[^\n]{0,90})",
         r"(?im)^\s*(topic\s+\d+(?:\.\d+)?\s*[:\-–]?\s*[^\n]{0,90})",
-    ]
-    for pat in candidates:
-        m = re.search(pat, text[:4000])
+    ]:
+        m = re.search(p, text[:4000])
         if m:
             return re.sub(r"\s+", " ", m.group(1)).strip()
     return fallback
 
-def extract_pdf(data: bytes, source_name: str):
-    docs = []
-    reader = PdfReader(io.BytesIO(data))
-    current_chapter = "Unknown chapter"
-    for i, page in enumerate(reader.pages, start=1):
-        text = clean_text(page.extract_text() or "")
-        if not text:
-            continue
-        chapter_guess = detect_chapter(text, current_chapter)
-        if chapter_guess != "Unknown chapter":
-            current_chapter = chapter_guess
-        docs.append(
-            Document(
-                page_content=text,
-                metadata={
-                    "source": source_name,
-                    "page": i,
-                    "chapter": current_chapter,
-                    "type": "pdf",
-                },
-            )
-        )
-    return docs
 
-def extract_docx(data: bytes, source_name: str):
-    docx = DocxDocument(io.BytesIO(data))
-    docs = []
-    page_like_parts = []
-    current_chapter = "Unknown chapter"
-
-    buffer = []
-    section_idx = 1
-    for p in docx.paragraphs:
-        text = clean_text(p.text)
-        if not text:
-            continue
-        if re.match(r"(?i)^(chapter|unit|topic)\s+\d+", text):
-            if buffer:
-                page_like_parts.append((section_idx, current_chapter, "\n".join(buffer)))
-                section_idx += 1
-                buffer = []
-            current_chapter = text
-        buffer.append(text)
-
-    if buffer:
-        page_like_parts.append((section_idx, current_chapter, "\n".join(buffer)))
-
-    for section_no, chapter, text in page_like_parts:
-        docs.append(
-            Document(
-                page_content=text,
-                metadata={
-                    "source": source_name,
-                    "page": section_no,
-                    "chapter": chapter,
-                    "type": "docx",
-                },
-            )
-        )
-    return docs
-
-def extract_text_file(data: bytes, source_name: str, file_type: str):
-    text = clean_text(data.decode("utf-8", errors="ignore"))
-    if not text:
-        return []
-
-    # Split very long plain-text files into "sections" before chunking.
-    raw_sections = re.split(r"(?im)(?=^\s*(?:chapter|unit|topic)\s+\d+)", text)
-    docs = []
-    current_chapter = "Unknown chapter"
-    section_no = 1
-
-    for section in raw_sections:
-        section = clean_text(section)
-        if not section:
-            continue
-        current_chapter = detect_chapter(section, current_chapter)
-        docs.append(
-            Document(
-                page_content=section,
-                metadata={
-                    "source": source_name,
-                    "page": section_no,
-                    "chapter": current_chapter,
-                    "type": file_type,
-                },
-            )
-        )
-        section_no += 1
-    return docs
-
-def load_uploaded_book(uploaded_file):
-    data = uploaded_file.getvalue()
-    name = safe_filename(uploaded_file.name)
+def raw_docs_from_upload(upload):
+    data = upload.getvalue()
+    name = safe_name(upload.name)
     ext = name.rsplit(".", 1)[-1].lower()
+    docs = []
 
     if ext == "pdf":
-        raw_docs = extract_pdf(data, name)
+        reader = PdfReader(io.BytesIO(data))
+        chapter = "Unknown chapter"
+        for page_no, page in enumerate(reader.pages, start=1):
+            text = clean(page.extract_text())
+            if not text:
+                continue
+            chapter = chapter_from(text, chapter)
+            docs.append(Document(page_content=text, metadata={"source": name, "page": page_no, "chapter": chapter, "type": ext}))
+
     elif ext == "docx":
-        raw_docs = extract_docx(data, name)
-    elif ext in ("txt", "md"):
-        raw_docs = extract_text_file(data, name, ext)
+        d = DocxDocument(io.BytesIO(data))
+        chapter = "Unknown chapter"
+        section = 1
+        buf = []
+        for para in d.paragraphs:
+            t = clean(para.text)
+            if not t:
+                continue
+            if re.match(r"(?i)^(chapter|unit|topic)\s+\d+", t):
+                if buf:
+                    docs.append(Document(page_content="\n".join(buf), metadata={"source": name, "page": section, "chapter": chapter, "type": ext}))
+                    section += 1
+                    buf = []
+                chapter = t
+            buf.append(t)
+        if buf:
+            docs.append(Document(page_content="\n".join(buf), metadata={"source": name, "page": section, "chapter": chapter, "type": ext}))
+
+    elif ext in {"txt", "md"}:
+        text = clean(data.decode("utf-8", errors="ignore"))
+        parts = re.split(r"(?im)(?=^\s*(?:chapter|unit|topic)\s+\d+)", text)
+        chapter = "Unknown chapter"
+        section = 1
+        for part in parts:
+            part = clean(part)
+            if not part:
+                continue
+            chapter = chapter_from(part, chapter)
+            docs.append(Document(page_content=part, metadata={"source": name, "page": section, "chapter": chapter, "type": ext}))
+            section += 1
     else:
-        raise ValueError(f"Unsupported file type: {ext}")
+        raise ValueError("Unsupported file type")
 
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1100,
-        chunk_overlap=180,
-        separators=["\n\n", "\n", ". ", " ", ""],
-    )
-    chunks = splitter.split_documents(raw_docs)
+    return data, name, docs
 
-    for idx, chunk in enumerate(chunks):
-        chunk.metadata["chunk_id"] = f"{file_hash(data)[:12]}-{idx}"
-        chunk.metadata["file_hash"] = file_hash(data)
-
-    chapters = sorted({d.metadata.get("chapter", "Unknown chapter") for d in chunks})
-    pages = sorted({d.metadata.get("page") for d in raw_docs if d.metadata.get("page") is not None})
-
-    meta = {
-        "name": name,
-        "hash": file_hash(data),
-        "size_mb": round(len(data) / (1024 * 1024), 2),
-        "chunks": len(chunks),
-        "pages_or_sections": len(pages),
-        "chapters": chapters,
-        "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-    }
-    return chunks, meta
 
 @st.cache_resource(show_spinner=False)
-def load_embeddings():
+def embeddings_model():
     return HuggingFaceEmbeddings(
         model_name=DEFAULT_EMBED_MODEL,
         model_kwargs={"device": "cpu"},
         encode_kwargs={"normalize_embeddings": True},
     )
 
-def rebuild_vectorstore():
+
+def rebuild_index():
     if not st.session_state.documents:
         st.session_state.vectorstore = None
-        return
-    embeddings = load_embeddings()
-    st.session_state.vectorstore = FAISS.from_documents(
-        st.session_state.documents,
-        embeddings,
-    )
+    else:
+        st.session_state.vectorstore = FAISS.from_documents(st.session_state.documents, embeddings_model())
 
-def add_uploaded_books(uploaded_files):
-    if not uploaded_files:
-        return
 
-    existing_hashes = {meta["hash"] for meta in st.session_state.books.values()}
+def index_uploads(files):
+    existing = {m["hash"] for m in st.session_state.books.values()}
     added = 0
-    errors = []
-
-    for uploaded_file in uploaded_files:
-        try:
-            data = uploaded_file.getvalue()
-            h = file_hash(data)
-            if h in existing_hashes:
-                continue
-            chunks, meta = load_uploaded_book(uploaded_file)
-            st.session_state.documents.extend(chunks)
-            st.session_state.books[meta["name"]] = meta
-            existing_hashes.add(h)
-            added += 1
-        except Exception as e:
-            errors.append(f"{uploaded_file.name}: {e}")
-
+    for upload in files or []:
+        data, name, raw_docs = raw_docs_from_upload(upload)
+        h = sha(data)
+        if h in existing:
+            continue
+        splitter = RecursiveCharacterTextSplitter(chunk_size=1100, chunk_overlap=180, separators=["\n\n", "\n", ". ", " ", ""])
+        chunks = splitter.split_documents(raw_docs)
+        for i, d in enumerate(chunks):
+            d.metadata["hash"] = h
+            d.metadata["chunk_id"] = f"{h[:12]}-{i}"
+        st.session_state.documents.extend(chunks)
+        st.session_state.books[name] = {
+            "name": name,
+            "hash": h,
+            "size_mb": round(len(data)/(1024*1024), 2),
+            "chunks": len(chunks),
+            "pages": len({d.metadata.get("page") for d in raw_docs}),
+            "chapters": sorted({d.metadata.get("chapter", "Unknown chapter") for d in chunks}),
+            "uploaded": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }
+        existing.add(h)
+        added += 1
     if added:
-        with st.spinner("Building textbook search index..."):
-            rebuild_vectorstore()
-        st.session_state.notice = f"Indexed {added} textbook(s)."
+        rebuild_index()
+    return added
 
-    if errors:
-        st.error("Some files could not be indexed:\n\n" + "\n".join(errors))
 
-def delete_book(book_name):
-    if book_name not in st.session_state.books:
-        return
-    st.session_state.documents = [
-        d for d in st.session_state.documents
-        if d.metadata.get("source") != book_name
-    ]
-    del st.session_state.books[book_name]
-    rebuild_vectorstore()
+def remove_book(name):
+    st.session_state.documents = [d for d in st.session_state.documents if d.metadata.get("source") != name]
+    st.session_state.books.pop(name, None)
+    rebuild_index()
+
 
 def hf_client():
-    token = get_secret("HF_TOKEN", "")
+    token = secret("HF_TOKEN")
     if not token:
         return None
     return InferenceClient(token=token, timeout=90)
 
-def call_llm(messages, model, temperature=0.4, max_tokens=900):
-    client = hf_client()
-    if client is None:
-        raise RuntimeError(
-            "HF_TOKEN is missing. Add it in Streamlit Secrets as HF_TOKEN='your_token'."
-        )
 
-    result = client.chat_completion(
-        model=model,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
-    return result.choices[0].message.content.strip()
+def ask_model(messages, model, temperature=.35, max_tokens=900):
+    c = hf_client()
+    if c is None:
+        raise RuntimeError("HF_TOKEN is missing. Add it to Streamlit Secrets.")
+    out = c.chat_completion(model=model, messages=messages, temperature=temperature, max_tokens=max_tokens)
+    return out.choices[0].message.content.strip()
 
-def retrieve_docs(query, selected_books, selected_chapters, k=7):
+
+def retrieve(query, selected_books, selected_chapters, k=6):
     if st.session_state.vectorstore is None:
         return []
-
-    # Retrieve a wider candidate set first, then apply UI filters.
-    candidates = st.session_state.vectorstore.similarity_search(query, k=max(24, k * 4))
-
-    filtered = []
-    seen = set()
-
+    candidates = st.session_state.vectorstore.similarity_search(query, k=max(24, k*4))
+    out, seen = [], set()
     for d in candidates:
-        src = d.metadata.get("source")
-        chapter = d.metadata.get("chapter", "Unknown chapter")
-        if selected_books and src not in selected_books:
+        if selected_books and d.metadata.get("source") not in selected_books:
             continue
-        if selected_chapters and chapter not in selected_chapters:
+        if selected_chapters and d.metadata.get("chapter") not in selected_chapters:
             continue
-
-        key = d.metadata.get("chunk_id") or (
-            src,
-            d.metadata.get("page"),
-            d.page_content[:80],
-        )
+        key = d.metadata.get("chunk_id") or (d.metadata.get("source"), d.metadata.get("page"), d.page_content[:100])
         if key in seen:
             continue
         seen.add(key)
-        filtered.append(d)
-
-        if len(filtered) >= k:
+        out.append(d)
+        if len(out) >= k:
             break
+    return out
 
-    return filtered
 
-def format_context(docs):
-    blocks = []
-    for i, d in enumerate(docs, start=1):
-        src = d.metadata.get("source", "Unknown source")
-        page = d.metadata.get("page", "?")
-        chapter = d.metadata.get("chapter", "Unknown chapter")
-        blocks.append(
-            f"[SOURCE {i} | {src} | page/section {page} | {chapter}]\n{d.page_content}"
-        )
-    return "\n\n".join(blocks)
+def context_text(docs):
+    return "\n\n".join(
+        f"[SOURCE {i} | {d.metadata.get('source')} | page/section {d.metadata.get('page')} | {d.metadata.get('chapter')}]\n{d.page_content}"
+        for i, d in enumerate(docs, start=1)
+    )
 
-def source_summary(docs):
-    summaries = []
-    seen = set()
+
+def source_cards(docs):
+    out, seen = [], set()
     for d in docs:
-        src = d.metadata.get("source", "Unknown source")
-        page = d.metadata.get("page", "?")
-        chapter = d.metadata.get("chapter", "Unknown chapter")
-        key = (src, page, chapter)
-        if key in seen:
+        item = (d.metadata.get("source"), d.metadata.get("page"), d.metadata.get("chapter"))
+        if item in seen:
             continue
-        seen.add(key)
-        summaries.append(
-            {
-                "source": src,
-                "page": page,
-                "chapter": chapter,
-                "excerpt": d.page_content[:420].strip(),
-            }
+        seen.add(item)
+        out.append({"source": item[0], "page": item[1], "chapter": item[2], "excerpt": d.page_content[:420]})
+    return out[:8]
+
+
+def answer_question(query, docs, mode, subject, answer_length, source_mode, history, model, temperature, web_results=None):
+    ctx = context_text(docs) if docs else "(No textbook passages retrieved.)"
+    length_rule = {"Short": "Be concise.", "Medium": "Give moderate detail.", "Detailed": "Give a thorough structured answer."}[answer_length]
+
+    if source_mode == "Textbook only":
+        grounding = 'Use ONLY textbook context. If insufficient, say: "I could not find enough information in the selected textbook material."'
+    else:
+        grounding = "Use textbook context first. You may add general knowledge, but clearly label unsupported additions as General knowledge."
+
+    web_block = ""
+    if web_results:
+        web_block = "\n\nWEB RESULTS:\n" + "\n\n".join(
+            f"[WEB {i}] {r['title']}\nURL: {r['url']}\n{r['content']}" for i, r in enumerate(web_results, 1)
         )
-    return summaries[:8]
-
-def build_answer(
-    query,
-    docs,
-    study_mode,
-    subject,
-    answer_length,
-    source_mode,
-    conversation,
-    model,
-    temperature,
-):
-    mode_instruction = STUDY_MODES[study_mode]
-    persona = SUBJECT_PERSONAS[subject]
-
-    length_instruction = {
-        "Short": "Keep the answer concise.",
-        "Medium": "Give a moderately detailed answer.",
-        "Detailed": "Give a thorough, well-structured explanation.",
-    }[answer_length]
-
-    if docs:
-        context = format_context(docs)
-    else:
-        context = "(No textbook passages were retrieved.)"
-
-    textbook_only = source_mode == "Textbook only"
-
-    if textbook_only:
-        grounding_rule = """
-Use the supplied textbook context as the only factual source.
-If the context is insufficient, clearly say:
-"I could not find enough information in the selected textbook material."
-Do not invent page numbers or textbook claims.
-"""
-    else:
-        grounding_rule = """
-Use the supplied textbook context first.
-You may use reliable general knowledge to explain missing background.
-Clearly label information that is not directly supported by the supplied textbook context as "General knowledge".
-Do not invent textbook citations.
-"""
-
-    history = []
-    for m in conversation[-8:]:
-        if m.get("role") in ("user", "assistant"):
-            history.append({"role": m["role"], "content": m["content"]})
+        grounding += " Also use the supplied web results. Cite them as [Web: 1], [Web: 2], etc. Never invent URLs."
 
     system = f"""
-{persona}
-
-You are part of a textbook-learning RAG application.
-
-Teaching mode: {study_mode}
-Teaching instruction: {mode_instruction}
-Answer length: {answer_length}
-Length instruction: {length_instruction}
-
-{grounding_rule}
+{SUBJECTS[subject]}
+Student level: {teaching_level}
+Study mode: {mode}. {STUDY_MODES[mode]}
+{length_rule}
+{grounding}
 
 Citation rules:
-- When using textbook evidence, cite it inline using this exact style:
-  [Source: filename, p. 12]
-- For DOCX/TXT/MD files, "p." means section number.
-- Only cite a page/section that is present in the provided context.
-- Never fabricate a citation.
-- Preserve important scientific and mathematical terminology.
-- Use Markdown headings, bullets, equations, or tables when they improve clarity.
+- For textbook claims cite only supplied context with [Source: filename, p. X].
+- For DOCX/TXT/MD, p. means section number.
+- Never fabricate citations or page numbers.
+- Use Markdown structure when useful.
 
 TEXTBOOK CONTEXT:
-{context}
+{ctx}
+{web_block}
 """.strip()
 
     messages = [{"role": "system", "content": system}]
-    messages.extend(history)
+    for m in history[-8:]:
+        if m.get("role") in {"user", "assistant"}:
+            messages.append({"role": m["role"], "content": m["content"]})
     messages.append({"role": "user", "content": query})
-
     max_tokens = {"Short": 500, "Medium": 850, "Detailed": 1300}[answer_length]
-    return call_llm(
-        messages,
-        model=model,
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
+    return ask_model(messages, model, temperature, max_tokens)
 
-def create_quiz(topic, docs, count, difficulty, model):
-    context = format_context(docs) if docs else "(No textbook context available.)"
+
+def json_array_from_model(prompt, model, max_tokens=1600):
+    text = ask_model([
+        {"role": "system", "content": "Return accurate educational content as valid JSON only."},
+        {"role": "user", "content": prompt},
+    ], model, .25, max_tokens)
+    m = re.search(r"\[[\s\S]*\]", text)
+    if not m:
+        raise ValueError("Model did not return a JSON array.")
+    return json.loads(m.group(0))
+
+
+def make_quiz(topic, docs, count, difficulty, model):
     prompt = f"""
-Create exactly {count} multiple-choice questions about: {topic}
-
-Difficulty: {difficulty}
-
-Use the textbook context whenever it contains relevant material.
-Return ONLY valid JSON in this format:
+Create exactly {count} multiple-choice questions about {topic}. Difficulty: {difficulty}.
+Return ONLY JSON:
 [
-  {{
-    "question": "...",
-    "options": ["A", "B", "C", "D"],
-    "answer_index": 0,
-    "explanation": "...",
-    "source": "filename, page/section X"
-  }}
+ {{"question":"...","options":["A","B","C","D"],"answer_index":0,"explanation":"...","source":"filename, page/section X"}}
 ]
-
-Rules:
-- Each question must have exactly 4 options.
-- answer_index must be 0, 1, 2, or 3.
-- Do not wrap JSON in Markdown fences.
-- If a source is not supported by context, use "General knowledge" instead of inventing a source.
-
-CONTEXT:
-{context}
+Each item must have exactly four options and answer_index 0-3. Never invent textbook source details; use General knowledge if needed.
+CONTEXT:\n{context_text(docs) if docs else '(none)'}
 """
-    text = call_llm(
-        [
-            {"role": "system", "content": "You generate reliable educational assessment content and valid JSON."},
-            {"role": "user", "content": prompt},
-        ],
-        model=model,
-        temperature=0.3,
-        max_tokens=1800,
-    )
-    text = text.strip()
-    match = re.search(r"\[[\s\S]*\]", text)
-    if not match:
-        raise ValueError("The model did not return a valid quiz JSON array.")
-    data = json.loads(match.group(0))
-
-    valid = []
-    for q in data:
-        if (
-            isinstance(q, dict)
-            and isinstance(q.get("options"), list)
-            and len(q["options"]) == 4
-            and isinstance(q.get("answer_index"), int)
-            and 0 <= q["answer_index"] <= 3
-        ):
-            valid.append(q)
+    data = json_array_from_model(prompt, model, 1800)
+    valid = [q for q in data if isinstance(q, dict) and len(q.get("options", [])) == 4 and q.get("answer_index") in [0,1,2,3]]
     if not valid:
-        raise ValueError("No valid quiz questions were returned.")
+        raise ValueError("No valid quiz questions returned.")
     return valid[:count]
 
-def create_flashcards(topic, docs, count, model):
-    context = format_context(docs) if docs else "(No textbook context available.)"
+
+def make_flashcards(topic, docs, count, model):
     prompt = f"""
-Create exactly {count} study flashcards about: {topic}
-
-Return ONLY valid JSON:
-[
-  {{
-    "front": "question or term",
-    "back": "clear answer",
-    "source": "filename, page/section X"
-  }}
-]
-
-Use textbook material when available.
-Never invent textbook source details.
-If unsupported by textbook context, set source to "General knowledge".
-
-CONTEXT:
-{context}
+Create exactly {count} flashcards about {topic}.
+Return ONLY JSON: [{{"front":"...","back":"...","source":"filename, page/section X"}}]
+Use textbook context when possible. Never invent sources; use General knowledge when needed.
+CONTEXT:\n{context_text(docs) if docs else '(none)'}
 """
-    text = call_llm(
-        [
-            {"role": "system", "content": "You create accurate revision flashcards and valid JSON."},
-            {"role": "user", "content": prompt},
-        ],
-        model=model,
-        temperature=0.25,
-        max_tokens=1500,
-    )
-    match = re.search(r"\[[\s\S]*\]", text)
-    if not match:
-        raise ValueError("The model did not return valid flashcard JSON.")
-    data = json.loads(match.group(0))
-    valid = [x for x in data if isinstance(x, dict) and x.get("front") and x.get("back")]
-    if not valid:
-        raise ValueError("No valid flashcards were returned.")
-    return valid[:count]
+    data = json_array_from_model(prompt, model, 1500)
+    return [x for x in data if isinstance(x, dict) and x.get("front") and x.get("back")][:count]
 
-def transcribe_audio(audio_bytes):
-    client = hf_client()
-    if client is None:
+
+def transcribe(audio_bytes):
+    c = hf_client()
+    if c is None:
         raise RuntimeError("HF_TOKEN is missing.")
-    output = client.automatic_speech_recognition(
-        audio_bytes,
-        model=DEFAULT_ASR_MODEL,
-    )
-    return output.text.strip()
+    return c.automatic_speech_recognition(audio_bytes, model=DEFAULT_ASR_MODEL).text.strip()
 
-def web_search_tavily(query):
-    # Optional real web research mode.
-    # It activates only if TAVILY_API_KEY is configured.
-    import requests
 
-    key = get_secret("TAVILY_API_KEY", "")
+def tavily_search(query):
+    key = secret("TAVILY_API_KEY")
     if not key:
         return []
-
-    response = requests.post(
-        "https://api.tavily.com/search",
-        json={
-            "api_key": key,
-            "query": query,
-            "search_depth": "basic",
-            "max_results": 5,
-            "include_answer": False,
-        },
-        timeout=20,
-    )
-    response.raise_for_status()
-    data = response.json()
-
-    results = []
-    for item in data.get("results", []):
-        results.append(
-            {
-                "title": item.get("title", "Web result"),
-                "url": item.get("url", ""),
-                "content": item.get("content", ""),
-            }
-        )
-    return results
-
-def build_web_answer(query, docs, web_results, study_mode, subject, answer_length, model, temperature):
-    textbook_context = format_context(docs) if docs else "(No textbook material retrieved.)"
-    web_context = "\n\n".join(
-        f"[WEB {i}] {r['title']}\nURL: {r['url']}\n{r['content']}"
-        for i, r in enumerate(web_results, start=1)
-    ) or "(No web results.)"
-
-    system = f"""
-{SUBJECT_PERSONAS[subject]}
-You are a careful research tutor.
-
-Teaching mode: {study_mode}
-{STUDY_MODES[study_mode]}
-
-Use both textbook and web material below.
-Distinguish textbook evidence from web evidence.
-Do not invent URLs, page numbers, or sources.
-For textbook claims use [Source: filename, p. X].
-For web claims use [Web: result number].
-
-TEXTBOOK:
-{textbook_context}
-
-WEB:
-{web_context}
-"""
-    max_tokens = {"Short": 500, "Medium": 850, "Detailed": 1300}[answer_length]
-    return call_llm(
-        [
-            {"role": "system", "content": system},
-            {"role": "user", "content": query},
-        ],
-        model=model,
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
+    r = requests.post("https://api.tavily.com/search", json={"api_key": key, "query": query, "search_depth": "basic", "max_results": 5}, timeout=20)
+    r.raise_for_status()
+    return [{"title": x.get("title", "Web result"), "url": x.get("url", ""), "content": x.get("content", "")} for x in r.json().get("results", [])]
 
 # ============================================================
 # SIDEBAR
 # ============================================================
 with st.sidebar:
     st.markdown("## 📚 Textbook AI")
-    st.caption("Your private study workspace")
+    st.caption("Your textbook RAG study workspace")
 
-    hf_token_present = bool(get_secret("HF_TOKEN", ""))
-    if hf_token_present:
-        st.success("AI connection ready", icon="✅")
-    else:
-        st.warning("Add `HF_TOKEN` in Streamlit Secrets.", icon="🔑")
+    token_ready = bool(secret("HF_TOKEN"))
+    st.success("AI connection ready", icon="✅") if token_ready else st.warning("Add HF_TOKEN in Secrets", icon="🔑")
 
     st.divider()
-
     st.markdown("### Library")
-    uploads = st.file_uploader(
-        "Upload textbooks",
-        type=SUPPORTED_TEXTBOOK_TYPES,
-        accept_multiple_files=True,
-        help="Supported: PDF, DOCX, TXT, MD. Scanned image-only PDFs may not extract text correctly.",
-    )
-
+    uploads = st.file_uploader("Upload textbooks", type=["pdf", "docx", "txt", "md"], accept_multiple_files=True)
     if st.button("📥 Index uploaded files", use_container_width=True, disabled=not uploads):
-        add_uploaded_books(uploads)
-        st.rerun()
+        try:
+            n = index_uploads(uploads)
+            st.success(f"Indexed {n} new textbook(s)." if n else "No new files to index.")
+        except Exception as e:
+            st.error(f"Indexing error: {e}")
 
-    if st.session_state.notice:
-        st.success(st.session_state.notice)
-        st.session_state.notice = ""
-
-    if st.session_state.books:
-        for book_name, meta in list(st.session_state.books.items()):
-            with st.expander(f"📘 {book_name}", expanded=False):
-                st.caption(
-                    f"{meta['size_mb']} MB • {meta['chunks']} chunks • "
-                    f"{meta['pages_or_sections']} pages/sections"
-                )
-                st.caption(f"Uploaded: {meta['uploaded_at']}")
-                if st.button("Remove book", key=f"remove_{meta['hash']}", use_container_width=True):
-                    delete_book(book_name)
-                    st.rerun()
-    else:
-        st.info("Upload one or more textbooks to enable RAG.")
+    for name, meta in list(st.session_state.books.items()):
+        with st.expander(f"📘 {name}"):
+            st.caption(f"{meta['size_mb']} MB • {meta['pages']} pages/sections • {meta['chunks']} chunks")
+            st.caption(f"Uploaded {meta['uploaded']}")
+            if st.button("Remove", key=f"rm_{meta['hash']}", use_container_width=True):
+                remove_book(name)
+                st.rerun()
 
     st.divider()
-    st.markdown("### Chat sessions")
-
-    new_chat_name = st.text_input("New chat name", placeholder="e.g. Cell Biology")
+    st.markdown("### Chats")
+    new_name = st.text_input("New chat name", placeholder="e.g. Organic Chemistry")
     if st.button("➕ Create chat", use_container_width=True):
-        name = new_chat_name.strip() or f"Chat {len(st.session_state.chat_sessions)+1}"
-        if name not in st.session_state.chat_sessions:
-            st.session_state.chat_sessions[name] = []
+        name = new_name.strip() or f"Chat {len(st.session_state.chat_sessions)+1}"
+        st.session_state.chat_sessions.setdefault(name, [])
         st.session_state.active_chat = name
         st.session_state.messages = st.session_state.chat_sessions[name]
         st.rerun()
 
-    chats = list(st.session_state.chat_sessions.keys())
-    active_index = chats.index(st.session_state.active_chat) if st.session_state.active_chat in chats else 0
-    chosen_chat = st.selectbox("Open chat", chats, index=active_index)
-    if chosen_chat != st.session_state.active_chat:
-        st.session_state.active_chat = chosen_chat
-        st.session_state.messages = st.session_state.chat_sessions[chosen_chat]
+    chat_names = list(st.session_state.chat_sessions)
+    idx = chat_names.index(st.session_state.active_chat) if st.session_state.active_chat in chat_names else 0
+    chosen = st.selectbox("Open chat", chat_names, index=idx)
+    if chosen != st.session_state.active_chat:
+        st.session_state.active_chat = chosen
+        st.session_state.messages = st.session_state.chat_sessions[chosen]
         st.rerun()
 
     if st.button("🗑️ Clear current chat", use_container_width=True):
@@ -807,290 +436,138 @@ with st.sidebar:
 
     st.divider()
     st.markdown("### Model settings")
-
-    llm_model = st.text_input(
-        "Hugging Face chat model",
-        value=get_secret("HF_MODEL", DEFAULT_LLM_MODEL) or DEFAULT_LLM_MODEL,
-    )
-    temperature = st.slider("Creativity", 0.0, 1.0, 0.35, 0.05)
+    model = st.text_input("Hugging Face chat model", value=secret("HF_MODEL", DEFAULT_LLM_MODEL) or DEFAULT_LLM_MODEL)
+    temperature = st.slider("Creativity", 0.0, 1.0, .35, .05)
     answer_length = st.selectbox("Answer length", ["Short", "Medium", "Detailed"], index=1)
-    teaching_level = st.selectbox(
-        "Student level",
-        ["Beginner", "Secondary School", "Advanced"],
-        index=1,
-    )
+    teaching_level = st.selectbox("Student level", ["Beginner", "Secondary School", "Advanced"], index=1)
 
 # ============================================================
-# MAIN HEADER
+# MAIN
 # ============================================================
-st.markdown(
-    f"""
-    <div class="hero">
-        <h1>📚 Textbook AI</h1>
-        <p>Upload textbooks, ask grounded questions, generate quizzes and flashcards, search your library, and track revision progress.</p>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+st.markdown("""
+<div class="hero"><h1>📚 Textbook AI</h1><p>Upload textbooks, ask grounded questions, generate quizzes and flashcards, search your library, and track revision progress.</p></div>
+""", unsafe_allow_html=True)
 
-# Selection controls
-book_names = list(st.session_state.books.keys())
-selected_books = st.multiselect(
-    "Search in textbooks",
-    options=book_names,
-    default=book_names,
-    placeholder="Choose one or more textbooks",
-)
+book_names = list(st.session_state.books)
+selected_books = st.multiselect("Search in textbooks", book_names, default=book_names)
+chapters = sorted({d.metadata.get("chapter", "Unknown chapter") for d in st.session_state.documents if not selected_books or d.metadata.get("source") in selected_books})
 
-available_chapters = sorted({
-    d.metadata.get("chapter", "Unknown chapter")
-    for d in st.session_state.documents
-    if not selected_books or d.metadata.get("source") in selected_books
-})
-
-with st.expander("🎛️ Study controls", expanded=False):
+with st.expander("🎛️ Study controls"):
     c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        subject = st.selectbox("Subject tutor", list(SUBJECT_PERSONAS.keys()))
-    with c2:
-        study_mode = st.selectbox("Study mode", list(STUDY_MODES.keys()))
-    with c3:
-        source_mode = st.selectbox(
-            "Knowledge mode",
-            ["Textbook only", "Textbook + general knowledge", "Textbook + web research"],
-        )
-    with c4:
-        retrieval_k = st.slider("Retrieved passages", 3, 10, 6)
+    subject = c1.selectbox("Subject tutor", list(SUBJECTS))
+    study_mode = c2.selectbox("Study mode", list(STUDY_MODES))
+    source_mode = c3.selectbox("Knowledge mode", ["Textbook only", "Textbook + general knowledge", "Textbook + web research"])
+    retrieval_k = c4.slider("Retrieved passages", 3, 10, 6)
+    selected_chapters = st.multiselect("Limit to chapters/topics", chapters, default=[])
 
-    selected_chapters = st.multiselect(
-        "Limit to chapters/topics",
-        available_chapters,
-        default=[],
-        placeholder="All chapters",
-    )
+if source_mode == "Textbook + web research" and not secret("TAVILY_API_KEY"):
+    st.info("Web research requires TAVILY_API_KEY in Streamlit Secrets. Without it, the app falls back to textbook + general knowledge.")
 
-    st.caption(f"Teaching level: **{teaching_level}**")
+tab_chat, tab_search, tab_quiz, tab_cards, tab_progress, tab_help = st.tabs(["💬 Chat", "🔎 Search", "📝 Quiz", "🎴 Flashcards", "📊 Progress", "ℹ️ Help"])
 
-if source_mode == "Textbook + web research" and not get_secret("TAVILY_API_KEY", ""):
-    st.info(
-        "Web research mode needs a `TAVILY_API_KEY` in Streamlit Secrets. "
-        "Without it, the app will fall back to textbook + general knowledge."
-    )
-
-tabs = st.tabs(["💬 Chat", "🔎 Search", "📝 Quiz", "🎴 Flashcards", "📊 Progress", "ℹ️ Help"])
-
-# ============================================================
-# CHAT TAB
-# ============================================================
-with tabs[0]:
+# CHAT
+with tab_chat:
     if not st.session_state.messages:
-        st.markdown("### What would you like to study?")
-        q1, q2, q3 = st.columns(3)
-        q1.info("**Explain a topic**\n\n“Explain mitosis in simple terms.”")
-        q2.info("**Prepare for exams**\n\n“Give me revision notes on electrolysis.”")
-        q3.info("**Solve step-by-step**\n\n“Show how to solve this quadratic equation.”")
+        a,b,c = st.columns(3)
+        a.info("**Explain a topic**\n\nExplain mitosis in simple terms.")
+        b.info("**Exam preparation**\n\nGive me revision notes on electrolysis.")
+        c.info("**Step-by-step**\n\nShow how to solve this quadratic equation.")
 
-    for msg in st.session_state.messages:
-        avatar = "🧑‍🎓" if msg["role"] == "user" else "📚"
-        with st.chat_message(msg["role"], avatar=avatar):
-            st.markdown(msg["content"])
-            if msg.get("sources"):
-                with st.expander("📖 Sources", expanded=False):
-                    for src in msg["sources"]:
-                        st.markdown(
-                            f"""
-                            <div class="source-card">
-                            <b>{src['source']}</b> — page/section {src['page']}<br>
-                            <span class="small-muted">{src['chapter']}</span><br><br>
-                            {src['excerpt']}
-                            </div>
-                            """,
-                            unsafe_allow_html=True,
-                        )
-            if msg.get("web_sources"):
-                with st.expander("🌐 Web sources", expanded=False):
-                    for i, src in enumerate(msg["web_sources"], start=1):
-                        st.markdown(f"{i}. [{src['title']}]({src['url']})")
+    for m in st.session_state.messages:
+        avatar = "🧑‍🎓" if m["role"] == "user" else "📚"
+        with st.chat_message(m["role"], avatar=avatar):
+            st.markdown(m["content"])
+            if m.get("sources"):
+                with st.expander("📖 Sources"):
+                    for s in m["sources"]:
+                        st.markdown(f"<div class='source-card'><b>{s['source']}</b> — page/section {s['page']}<br><span class='small-muted'>{s['chapter']}</span><br><br>{s['excerpt']}</div>", unsafe_allow_html=True)
+            if m.get("web_sources"):
+                with st.expander("🌐 Web sources"):
+                    for i,s in enumerate(m["web_sources"],1):
+                        st.markdown(f"{i}. [{s['title']}]({s['url']})")
 
-    voice_text = ""
-    with st.expander("🎤 Ask by voice", expanded=False):
+    with st.expander("🎤 Ask by voice"):
         audio = st.audio_input("Record a question")
-        if audio is not None:
-            if st.button("Transcribe recording"):
-                try:
-                    with st.spinner("Transcribing..."):
-                        voice_text = transcribe_audio(audio.getvalue())
-                    st.success(f"Transcript: {voice_text}")
-                    st.session_state["voice_transcript"] = voice_text
-                except Exception as e:
-                    st.error(f"Voice transcription failed: {e}")
-
+        if audio and st.button("Transcribe recording"):
+            try:
+                with st.spinner("Transcribing..."):
+                    st.session_state.voice_transcript = transcribe(audio.getvalue())
+                st.success(st.session_state.voice_transcript)
+            except Exception as e:
+                st.error(f"Voice transcription failed: {e}")
         if st.session_state.get("voice_transcript"):
-            st.caption("Copy the transcript into the chat box below, or edit it first.")
-            st.code(st.session_state["voice_transcript"])
+            st.code(st.session_state.voice_transcript)
 
-    prompt = st.chat_input(
-        "Ask about your textbooks...",
-        accept_file=True,
-        file_type=["png", "jpg", "jpeg"],
-        disabled=not hf_token_present,
-    )
-
+    prompt = st.chat_input("Ask about your textbooks...", accept_file=True, file_type=["png","jpg","jpeg"], disabled=not token_ready)
     if prompt:
-        # New Streamlit returns a ChatInputValue when attachments are enabled.
         if isinstance(prompt, str):
-            user_query = prompt
-            attachments = []
+            query, attached = prompt, []
         else:
-            user_query = prompt.text or ""
-            attachments = list(prompt.files or [])
-
-        if attachments:
-            st.warning(
-                "Image attachments are accepted in the interface, but this version's "
-                "Llama text model cannot directly understand images. Type the question shown "
-                "in the image, or switch the backend to a vision-language model."
-            )
-
-        if user_query.strip():
-            user_query = user_query.strip()
-            user_msg = {"role": "user", "content": user_query}
-            st.session_state.messages.append(user_msg)
+            query, attached = prompt.text or "", list(prompt.files or [])
+        if attached:
+            st.warning("Image attachment received, but this text-only Llama backend cannot inspect images yet. Type the question shown in the image or switch to a vision-language model.")
+        if query.strip():
+            query = query.strip()
+            st.session_state.messages.append({"role":"user","content":query})
             st.session_state.chat_sessions[st.session_state.active_chat] = st.session_state.messages
-
             with st.chat_message("user", avatar="🧑‍🎓"):
-                st.markdown(user_query)
-
+                st.markdown(query)
             with st.chat_message("assistant", avatar="📚"):
                 try:
-                    with st.spinner("Searching your textbooks and preparing the answer..."):
-                        docs = retrieve_docs(
-                            user_query,
-                            selected_books,
-                            selected_chapters,
-                            k=retrieval_k,
-                        )
-                        web_sources = []
-
-                        if source_mode == "Textbook + web research" and get_secret("TAVILY_API_KEY", ""):
-                            web_sources = web_search_tavily(user_query)
-                            response = build_web_answer(
-                                user_query,
-                                docs,
-                                web_sources,
-                                study_mode,
-                                subject,
-                                answer_length,
-                                llm_model,
-                                temperature,
-                            )
-                        else:
-                            effective_mode = source_mode
-                            if source_mode == "Textbook + web research":
-                                effective_mode = "Textbook + general knowledge"
-
-                            response = build_answer(
-                                user_query,
-                                docs,
-                                study_mode,
-                                subject,
-                                answer_length,
-                                effective_mode,
-                                st.session_state.messages[:-1],
-                                llm_model,
-                                temperature,
-                            )
-
+                    with st.spinner("Searching your textbooks..."):
+                        docs = retrieve(query, selected_books, selected_chapters, retrieval_k)
+                        web_results = []
+                        effective = source_mode
+                        if source_mode == "Textbook + web research":
+                            if secret("TAVILY_API_KEY"):
+                                web_results = tavily_search(query)
+                            else:
+                                effective = "Textbook + general knowledge"
+                        response = answer_question(query, docs, study_mode, subject, answer_length, effective, st.session_state.messages[:-1], model, temperature, web_results)
                     st.markdown(response)
-                    sources = source_summary(docs)
-                    st.session_state.last_sources = sources
-
+                    sources = source_cards(docs)
                     if sources:
-                        with st.expander("📖 Sources used", expanded=False):
-                            for src in sources:
-                                st.markdown(
-                                    f"**{src['source']}** — page/section {src['page']}  \n"
-                                    f"*{src['chapter']}*"
-                                )
-
-                    if web_sources:
-                        with st.expander("🌐 Web sources used", expanded=False):
-                            for i, src in enumerate(web_sources, start=1):
-                                st.markdown(f"{i}. [{src['title']}]({src['url']})")
-
-                    assistant_msg = {
-                        "role": "assistant",
-                        "content": response,
-                        "sources": sources,
-                        "web_sources": web_sources,
-                    }
-                    st.session_state.messages.append(assistant_msg)
+                        with st.expander("📖 Sources used"):
+                            for s in sources:
+                                st.markdown(f"**{s['source']}** — page/section {s['page']}  \n*{s['chapter']}*")
+                    if web_results:
+                        with st.expander("🌐 Web sources used"):
+                            for i,s in enumerate(web_results,1):
+                                st.markdown(f"{i}. [{s['title']}]({s['url']})")
+                    st.session_state.messages.append({"role":"assistant","content":response,"sources":sources,"web_sources":web_results})
                     st.session_state.chat_sessions[st.session_state.active_chat] = st.session_state.messages
-
                     st.session_state.progress["questions_asked"] += 1
-                    topic_key = user_query[:50]
-                    st.session_state.progress["topics"][topic_key] += 1
-
+                    st.session_state.progress["topics"][query[:60]] += 1
                 except Exception as e:
                     st.error(f"AI error: {e}")
 
-# ============================================================
-# SEARCH TAB
-# ============================================================
-with tabs[1]:
+# SEARCH
+with tab_search:
     st.markdown("### 🔎 Search your textbook library")
-    search_query = st.text_input("Search phrase or concept", placeholder="e.g. osmosis, Newton's second law")
-    search_count = st.slider("Number of results", 3, 15, 8, key="search_count")
-
-    if st.button("Search textbooks", disabled=not search_query.strip()):
+    sq = st.text_input("Search phrase or concept", placeholder="e.g. osmosis")
+    nres = st.slider("Number of results", 3, 15, 8, key="nres")
+    if st.button("Search textbooks", disabled=not sq.strip()):
         if st.session_state.vectorstore is None:
-            st.warning("Upload and index at least one textbook first.")
+            st.warning("Upload and index a textbook first.")
         else:
-            st.session_state.last_search_results = retrieve_docs(
-                search_query,
-                selected_books,
-                selected_chapters,
-                k=search_count,
-            )
+            st.session_state.last_search_results = retrieve(sq, selected_books, selected_chapters, nres)
+    for i,d in enumerate(st.session_state.last_search_results,1):
+        with st.expander(f"{i}. {d.metadata.get('source')} — page/section {d.metadata.get('page')}", expanded=i<=3):
+            st.caption(d.metadata.get("chapter"))
+            st.write(d.page_content)
 
-    if st.session_state.last_search_results:
-        for i, d in enumerate(st.session_state.last_search_results, start=1):
-            with st.expander(
-                f"{i}. {d.metadata.get('source')} — page/section {d.metadata.get('page')}",
-                expanded=i <= 3,
-            ):
-                st.caption(d.metadata.get("chapter", "Unknown chapter"))
-                st.write(d.page_content)
-
-# ============================================================
-# QUIZ TAB
-# ============================================================
-with tabs[2]:
+# QUIZ
+with tab_quiz:
     st.markdown("### 📝 Generate a textbook quiz")
-    qc1, qc2, qc3 = st.columns([2, 1, 1])
-    with qc1:
-        quiz_topic = st.text_input("Quiz topic", placeholder="e.g. Cell division")
-    with qc2:
-        quiz_count = st.selectbox("Questions", [3, 5, 8, 10], index=1)
-    with qc3:
-        difficulty = st.selectbox("Difficulty", ["Easy", "Medium", "Hard"], index=1)
-
-    if st.button("✨ Generate quiz", disabled=not quiz_topic.strip()):
+    q1,q2,q3 = st.columns([2,1,1])
+    topic = q1.text_input("Quiz topic", placeholder="e.g. Cell division")
+    qcount = q2.selectbox("Questions", [3,5,8,10], index=1)
+    difficulty = q3.selectbox("Difficulty", ["Easy","Medium","Hard"], index=1)
+    if st.button("✨ Generate quiz", disabled=not topic.strip()):
         try:
-            docs = retrieve_docs(
-                quiz_topic,
-                selected_books,
-                selected_chapters,
-                k=min(10, retrieval_k + 2),
-            )
+            docs = retrieve(topic, selected_books, selected_chapters, min(10,retrieval_k+2))
             with st.spinner("Generating quiz..."):
-                st.session_state.quiz = create_quiz(
-                    quiz_topic,
-                    docs,
-                    quiz_count,
-                    difficulty,
-                    llm_model,
-                )
+                st.session_state.quiz = make_quiz(topic, docs, qcount, difficulty, model)
             st.session_state.quiz_submitted = False
             st.rerun()
         except Exception as e:
@@ -1099,203 +576,86 @@ with tabs[2]:
     if st.session_state.quiz:
         with st.form("quiz_form"):
             answers = []
-            for i, q in enumerate(st.session_state.quiz):
+            for i,q in enumerate(st.session_state.quiz):
                 st.markdown(f"**{i+1}. {q['question']}**")
-                choice = st.radio(
-                    "Choose an answer",
-                    q["options"],
-                    key=f"quiz_answer_{i}",
-                    index=None,
-                    label_visibility="collapsed",
-                )
-                answers.append(choice)
+                answers.append(st.radio("Choose", q["options"], key=f"qa_{i}", index=None, label_visibility="collapsed"))
                 st.divider()
-
             submitted = st.form_submit_button("Submit answers", use_container_width=True)
-
         if submitted:
-            correct = 0
-            for i, q in enumerate(st.session_state.quiz):
-                selected = answers[i]
-                correct_option = q["options"][q["answer_index"]]
-                if selected == correct_option:
-                    correct += 1
-
+            st.session_state.quiz_answers = answers
+            st.session_state.quiz_submitted = True
+            correct = sum(a == q["options"][q["answer_index"]] for a,q in zip(answers, st.session_state.quiz))
             st.session_state.progress["quizzes_taken"] += 1
             st.session_state.progress["quiz_correct"] += correct
             st.session_state.progress["quiz_total"] += len(st.session_state.quiz)
-            st.session_state.quiz_submitted = True
-            st.session_state["last_quiz_answers"] = answers
-
         if st.session_state.quiz_submitted:
-            answers = st.session_state.get("last_quiz_answers", [])
             correct = 0
-            for i, q in enumerate(st.session_state.quiz):
-                selected = answers[i] if i < len(answers) else None
-                correct_option = q["options"][q["answer_index"]]
-                is_correct = selected == correct_option
-                correct += int(is_correct)
-
-                if is_correct:
+            for i,q in enumerate(st.session_state.quiz):
+                selected = st.session_state.quiz_answers[i] if i < len(st.session_state.quiz_answers) else None
+                right = q["options"][q["answer_index"]]
+                if selected == right:
+                    correct += 1
                     st.success(f"Question {i+1}: Correct")
                 else:
-                    st.error(
-                        f"Question {i+1}: Correct answer — {correct_option}"
-                    )
+                    st.error(f"Question {i+1}: Correct answer — {right}")
                 st.write(q.get("explanation", ""))
-                if q.get("source"):
-                    st.caption(f"Source: {q['source']}")
+                st.caption(f"Source: {q.get('source','Unknown')}")
+            st.metric("Quiz score", f"{round(100*correct/len(st.session_state.quiz))}%")
 
-            score = round(100 * correct / len(st.session_state.quiz))
-            st.metric("Quiz score", f"{score}%")
-
-# ============================================================
-# FLASHCARDS TAB
-# ============================================================
-with tabs[3]:
+# FLASHCARDS
+with tab_cards:
     st.markdown("### 🎴 Generate revision flashcards")
-    fc1, fc2 = st.columns([3, 1])
-    with fc1:
-        flash_topic = st.text_input("Flashcard topic", placeholder="e.g. Organic chemistry reactions")
-    with fc2:
-        flash_count = st.selectbox("Cards", [5, 8, 10, 15], index=1)
-
-    if st.button("✨ Generate flashcards", disabled=not flash_topic.strip()):
+    f1,f2 = st.columns([3,1])
+    ftopic = f1.text_input("Flashcard topic", placeholder="e.g. Organic chemistry reactions")
+    fcount = f2.selectbox("Cards", [5,8,10,15], index=1)
+    if st.button("✨ Generate flashcards", disabled=not ftopic.strip()):
         try:
-            docs = retrieve_docs(
-                flash_topic,
-                selected_books,
-                selected_chapters,
-                k=min(10, retrieval_k + 2),
-            )
+            docs = retrieve(ftopic, selected_books, selected_chapters, min(10,retrieval_k+2))
             with st.spinner("Creating flashcards..."):
-                st.session_state.flashcards = create_flashcards(
-                    flash_topic,
-                    docs,
-                    flash_count,
-                    llm_model,
-                )
+                st.session_state.flashcards = make_flashcards(ftopic, docs, fcount, model)
             st.rerun()
         except Exception as e:
             st.error(f"Could not create flashcards: {e}")
+    for i,c in enumerate(st.session_state.flashcards,1):
+        with st.expander(f"Card {i}: {c['front']}"):
+            st.markdown(c["back"])
+            st.caption(f"Source: {c.get('source','Unknown')}")
 
-    if st.session_state.flashcards:
-        for i, card in enumerate(st.session_state.flashcards, start=1):
-            with st.expander(f"Card {i}: {card['front']}", expanded=False):
-                st.markdown(card["back"])
-                st.caption(f"Source: {card.get('source', 'Unknown')}")
-
-# ============================================================
-# PROGRESS TAB
-# ============================================================
-with tabs[4]:
+# PROGRESS
+with tab_progress:
     st.markdown("### 📊 Study progress")
-    progress = st.session_state.progress
-
-    accuracy = (
-        100 * progress["quiz_correct"] / progress["quiz_total"]
-        if progress["quiz_total"] else 0
-    )
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Questions asked", progress["questions_asked"])
-    m2.metric("Quizzes taken", progress["quizzes_taken"])
-    m3.metric("Quiz accuracy", f"{accuracy:.0f}%")
-    m4.metric("Textbooks", len(st.session_state.books))
-
-    st.markdown("#### Library overview")
+    p = st.session_state.progress
+    acc = 100*p["quiz_correct"]/p["quiz_total"] if p["quiz_total"] else 0
+    a,b,c,d = st.columns(4)
+    a.metric("Questions asked", p["questions_asked"])
+    b.metric("Quizzes taken", p["quizzes_taken"])
+    c.metric("Quiz accuracy", f"{acc:.0f}%")
+    d.metric("Textbooks", len(st.session_state.books))
     if st.session_state.books:
-        rows = []
-        for meta in st.session_state.books.values():
-            rows.append(
-                {
-                    "Textbook": meta["name"],
-                    "Pages/sections": meta["pages_or_sections"],
-                    "Chunks": meta["chunks"],
-                    "Size (MB)": meta["size_mb"],
-                }
-            )
+        rows = [{"Textbook":m["name"],"Pages/sections":m["pages"],"Chunks":m["chunks"],"Size (MB)":m["size_mb"]} for m in st.session_state.books.values()]
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-    else:
-        st.info("No books indexed yet.")
-
-    st.markdown("#### Recently studied questions")
-    topics = dict(progress["topics"])
+    topics = dict(p["topics"])
     if topics:
-        topic_rows = [
-            {"Question/topic": k, "Times studied": v}
-            for k, v in sorted(topics.items(), key=lambda x: x[1], reverse=True)[:10]
-        ]
-        st.dataframe(pd.DataFrame(topic_rows), use_container_width=True, hide_index=True)
-    else:
-        st.caption("Ask some questions to build your progress history.")
+        rows = [{"Question/topic":k,"Times studied":v} for k,v in sorted(topics.items(), key=lambda x:x[1], reverse=True)[:10]]
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-# ============================================================
-# HELP TAB
-# ============================================================
-with tabs[5]:
-    st.markdown("### ℹ️ Setup and features")
-    st.markdown(
-        """
-        **Core features included**
-        - Multiple PDF, DOCX, TXT, and Markdown textbook uploads
-        - Real FAISS vector search with local sentence-transformer embeddings
-        - Page/section metadata and textbook source citations
-        - Textbook-only and textbook + general-knowledge modes
-        - Optional live web research with Tavily
-        - Subject-specific tutor personalities
-        - Explain Simply, Exam, Summary, Quiz, Flashcard, Revision, Homework, and Math modes
-        - Multi-chat session history during the current Streamlit session
-        - Search across uploaded textbooks
-        - Quiz generation, scoring, and progress tracking
-        - Flashcard generation
-        - Voice-question transcription through Hugging Face ASR
-        - Image attachment UI for future vision-model support
-        """
-    )
+# HELP
+with tab_help:
+    st.markdown("### ℹ️ Setup")
+    st.markdown("""
+**Included:** multiple textbook uploads, FAISS RAG, local embeddings, page/section metadata, citations, subject tutors, study modes, quiz generation, flashcards, textbook search, session chat history, progress tracking, voice transcription, optional live web research, and image-attachment UI.
 
-    st.markdown("#### Streamlit Secrets")
-    st.code(
-       HF_TOKEN = "hf_your_actual_token"
+**Streamlit Secrets:**
+```toml
+HF_TOKEN = "hf_your_token_here"
+HF_MODEL = "meta-llama/Llama-3.1-8B-Instruct"  # optional
+TAVILY_API_KEY = "tvly_your_key_here"         # optional, for live web search
+```
 
-        # Optional
-        HF_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
-        
-        # Optional — only needed for web research
-        TAVILY_API_KEY = "tvly_your_key"
-    st.warning(
-        "Do not place API keys directly inside `app.py` or commit them to GitHub."
-    )
-
-    st.markdown("#### Important limitations")
-    st.markdown(
-        """
-        - **Scanned PDFs:** `pypdf` extracts embedded text, not OCR. Image-only/scanned textbooks need an OCR pipeline.
-        - **Image questions:** the current Llama text model cannot inspect uploaded photos. The UI accepts them, but true image understanding requires a vision-language model.
-        - **Persistence:** chats, books, quiz scores, and the FAISS index are stored in Streamlit session memory. A production app should save them to a database/object store.
-        - **Hugging Face availability:** serverless model/provider availability can change. If a model is unavailable, set `HF_MODEL` to another chat-capable model available to your account.
-        """
-    )
-'''
-
-requirements = '''streamlit>=1.63,<2
-huggingface-hub>=0.35
-langchain-core>=0.3,<2
-langchain-community>=0.3,<2
-langchain-text-splitters>=0.3,<2
-langchain-huggingface>=0.3,<2
-sentence-transformers>=3.0
-faiss-cpu>=1.8
-pypdf>=5.0
-python-docx>=1.1
-pandas>=2.2
-requests>=2.32
-'''
-
-Path("/mnt/data/app.py").write_text(app_code, encoding="utf-8")
-Path("/mnt/data/requirements.txt").write_text(requirements, encoding="utf-8")
-
-# basic syntax check
-compile(app_code, "/mnt/data/app.py", "exec")
-
-print("Created app.py and requirements.txt successfully.")
+**Important limitations:**
+- Scanned/image-only PDFs need OCR; `pypdf` only extracts embedded text.
+- The current Llama backend is text-only, so photo understanding needs a vision-language model.
+- Library data, chats, FAISS index, and progress are stored in Streamlit session memory. Add a database/object store for true persistent accounts.
+- Hugging Face serverless model availability can change; set `HF_MODEL` to another chat-capable model if needed.
+""")
+    st.warning("Never hard-code API keys in app.py or commit them to GitHub.")
