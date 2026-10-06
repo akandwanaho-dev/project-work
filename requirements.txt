@@ -11,3 +11,4 @@ langchain-classic
 pypdf
 transformers
 torch
+huggingface_hub
