@@ -498,7 +498,7 @@ with tab_chat:
         if st.session_state.get("voice_transcript"):
             st.code(st.session_state.voice_transcript)
 
-    prompt = st.chat_input("Ask about your textbooks...", accept_file=True, file_type=["png","jpg","jpeg"], disabled=not token_ready)
+    prompt = st.chat_input("Ask about your textbooks...", accept_file=True, file_type=["png","jpg","jpeg","pdf"], disabled=not token_ready)
     if prompt:
         if isinstance(prompt, str):
             query, attached = prompt, []
