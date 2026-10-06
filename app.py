@@ -1,238 +1,131 @@
 import os
 import streamlit as st
-from dotenv import load_dotenv
-
-# Document Processing & RAG Pipeline Libraries
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_groq import ChatGroq
-from langchain_classic.chains import create_retrieval_chain
-from langchain_classic.chains.combine_documents import create_stuff_documents_chain
-
+from langchain_huggingface import HuggingFaceEndpoint, ChatHuggingFace
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough
 
-# 1. Page & Layout Settings
-st.set_page_config(page_title="Textbook AI Tutor (Groq)", page_icon="📚", layout="wide")
+# ==========================================================
+# 1. SETUP FREE HUGGING FACE INFERENCE ENGINE
+# ==========================================================
+def load_huggingface_llm():
+    """
+    Initializes a free serverless LLM endpoint from Hugging Face Hub.
+    """
+    # Safely extract your key from Streamlit Cloud Secrets
+    hf_token = st.secrets.get("HF_TOKEN")
+    
+    if not hf_token:
+        st.error("🔑 **HF_TOKEN Missing:** Please add your Hugging Face token to your Streamlit App Secrets.")
+        st.stop()
 
-# Custom Visual Enhancements & Accent Badging
-st.markdown("""
-    <style>
-    .metric-card {
-        background-color: #f8f9fa;
-        border: 1px solid #e9ecef;
-        padding: 15px;
-        border-radius: 10px;
-        text-align: center;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.02);
-    }
-    .metric-value {
-        font-size: 24px;
-        font-weight: bold;
-        color: #ff4b4b;
-    }
-    .metric-label {
-        font-size: 14px;
-        color: #6c757d;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-    }
-    </style>
-""", unsafe_allow_html=True)
+    try:
+        # We use Llama-3.1-8B-Instruct because it offers excellent reasoning constraints for RAG pipelines
+        llm_endpoint = HuggingFaceEndpoint(
+            repo_id="meta-llama/Meta-Llama-3.1-8B-Instruct",
+            task="text-generation",
+            max_new_tokens=512,
+            temperature=0.6,
+            huggingfacehub_api_token=hf_token,
+            timeout=30
+        )
+        
+        # Wrap it in ChatHuggingFace so it formats multi-turn chat dialogues correctly
+        return ChatHuggingFace(llm=llm_endpoint)
+        
+    except Exception as e:
+        st.error(f"Failed to connect to Hugging Face endpoint: {e}")
+        st.stop()
 
-# App Core Title Layout
-st.title("📚 Chat with your Textbook")
-st.caption("⚡ Powered by Groq's ultra-fast inference cloud & local text tokenizers.")
-st.divider()
+# ==========================================================
+# 2. YOUR VECTOR DATABASE RETRIEVER INTERFACE
+# ==========================================================
+def initialize_retriever():
+    """
+    Loads your document knowledge base retriever.
+    NOTE: Replace the fallback class below with your actual FAISS/Chroma database tool!
+    """
+    # EXAMPLE SWAP:
+    # db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
+    # return db.as_retriever(search_kwargs={"k": 3})
+    
+    class LocalMockRetriever:
+        def invoke(self, query):
+            return "ISCC Uganda Grand Championship Finals and Innovation Bootcamp are scheduled for December."
+            
+    return LocalMockRetriever()
 
-# Load local environment variables if a .env file exists
-load_dotenv()
+# ==========================================================
+# 3. BUILD THE RAG DATA CHAIN
+# ==========================================================
+def build_rag_pipeline(llm, retriever):
+    """
+    Connects Context + Input via LangChain Expression Language (LCEL)
+    """
+    system_prompt = """You are a smart assistant for the ISCC Uganda Coding Competition. 
+    Use the provided piece of retrieved context below to answer the user's question accurately. 
+    If you do not know the answer based on the context, politely say that you do not know.
 
-# 2. Initialization of Persistent Session States
-if "messages" not in st.session_state:
-    st.session_state.messages = []  # Conversation log storage
+    Context:
+    {context}
+    """
+    
+    prompt_template = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        ("human", "{input}")
+    ])
+    
+    # Executable analytical flow map
+    chain = (
+        {"context": retriever | RunnablePassthrough(), "input": RunnablePassthrough()}
+        | prompt_template
+        | llm
+        | StrOutputParser()
+    )
+    return chain
+
+# ==========================================================
+# 4. STREAMLIT APPLICATION SURFACE
+# ==========================================================
+st.set_page_config(page_title="ISCC AI Bot", page_icon="⚡", layout="centered")
+st.title("⚡ Competition RAG Chatbot")
+st.caption("Powered by Hugging Face Hub Serverless APIs & LangChain")
+
+# Instantiate and cache components inside Streamlit's global session state
 if "rag_chain" not in st.session_state:
-    st.session_state.rag_chain = None  # Holds the operational backend pipeline
-if "doc_stats" not in st.session_state:
-    st.session_state.doc_stats = None  # Holds metadata stats for display
+    with st.spinner("Initializing Hugging Face model environment..."):
+        chat_llm = load_huggingface_llm()
+        data_retriever = initialize_retriever()
+        st.session_state.rag_chain = build_rag_pipeline(chat_llm, data_retriever)
 
-# 3. Sidebar Configuration Space
-with st.sidebar:
-    st.header("⚙️ Configuration Workspace")
-    
-    # Check for environmental key setup fallback
-    env_key = os.environ.get("GROQ_API_KEY", "")
-    
-    # UI input space for the API Key
-    user_api_key = st.text_input(
-        "Groq API Key",
-        value=env_key,
-        type="password",
-        help="Obtain an API key for free by signing up at https://groq.com",
-        placeholder="gsk_..."
-    )
-    
-    # Dynamically track validation flag state
-    has_api_key = len(user_api_key.strip()) > 0
-    
-    if not has_api_key:
-        st.warning("⚠️ Access Token Needed: Enter your Groq API Key above to unlock document parsing and context matching features.")
-    else:
-        st.success("🔒 Authorization token detected.")
+# Persistent Chat Log History Array
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-    st.divider()
-    st.header("📥 Upload Center")
+# Display previous conversation streams
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+# User prompt field detection
+if user_query := st.chat_input("Ask something about the competition files..."):
     
-    # Control document uploading space depending on explicit authorization status
-    uploaded_file = st.file_uploader(
-        "Choose a textbook PDF", 
-        type="pdf", 
-        disabled=not has_api_key
-    )
-    
-    if uploaded_file and has_api_key:
-        # Re-build database pipeline if it has not been registered to the session state yet
-        if st.session_state.rag_chain is None:
-            with st.spinner("Parsing syntax trees and optimizing textbook segments..."):
-                
-                # Write local asset layer buffer out cleanly 
-                temp_path = f"temp_{uploaded_file.name}"
-                with open(temp_path, "wb") as f:
-                    f.write(uploaded_file.getbuffer())
-                
-                try:
-                    # PDF loading engine initialization
-                    loader = PyPDFLoader(temp_path)
-                    docs = loader.load()
-                    
-                    # Compute page-level and volume statistics
-                    total_pages = len(docs)
-                    total_chars = sum(len(doc.page_content) for doc in docs)
-                    
-                    # Token Chunking Strategy Execution
-                    text_splitter = RecursiveCharacterTextSplitter(
-                        chunk_size=1000, 
-                        chunk_overlap=200,
-                        length_function=len
-                    )
-                    chunks = text_splitter.split_documents(docs)
-                    
-                    # Register document statistics context to session states
-                    st.session_state.doc_stats = {
-                        "filename": uploaded_file.name,
-                        "pages": total_pages,
-                        "chars": total_chars,
-                        "chunks": len(chunks)
-                    }
-                    
-                    # Create Vector Space Embedding Infrastructure
-                    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-                    vectorstore = FAISS.from_documents(documents=chunks, embedding=embeddings)
-                    retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
-                    
-                    # Instantiate Groq Engine with the UI-provided API Key
-                    # Change this model identifier to a currently supported production endpoint
-                    llm = ChatGroq(
-                        model="llama-3.1-8b-instant",  # Updated from llama3-8b-8192
-                        temperature=0.2,
-                        groq_api_key=user_api_key
-                    )
-
-                    
-                    # Construct Prompt Engineering blue-print matrices
-                    system_prompt = (
-                        "You are an expert AI Textbook Tutor. Your goal is to help students understand their course material.\n"
-                        "Use the following pieces of retrieved context from the textbook to answer the student's question.\n"
-                        "If you don't know the answer or if it isn't in the text, say honestly that you cannot find it in the provided textbook pages.\n"
-                        "Keep your answer structured, clear, and educational. Use bullet points where appropriate.\n\n"
-                        "Context:\n{context}"
-                    )
-                    
-                    prompt = ChatPromptTemplate.from_messages([
-                        ("system", system_prompt),
-                        ("human", "{input}"),
-                    ])
-                    
-                    # Compile executable RAG execution paths
-                    document_chain = create_stuff_documents_chain(llm, prompt)
-                    st.session_state.rag_chain = create_retrieval_chain(retriever, document_chain)
-                    st.success("🚀 Index structure created!")
-                    st.rerun()
-                    
-                except Exception as e:
-                    st.error(f"An error occurred while compiling your data: {e}")
-                    
-                finally:
-                    if os.path.exists(temp_path):
-                        os.remove(temp_path)
-
-# 4. Main App Grid Layout
-# Split screen layout into an interactive split view if stats exist
-if st.session_state.doc_stats:
-    # Document Analytical Breakdown Header
-    st.subheader(f"📊 Document Insights: `{st.session_state.doc_stats['filename']}`")
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-label">Total Document Pages</div>
-                <div class="metric-value">{st.session_state.doc_stats['pages']}</div>
-            </div>
-        """, unsafe_allow_html=True)
-    with col2:
-        st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-label">Extracted Characters</div>
-                <div class="metric-value">{st.session_state.doc_stats['chars']:,}</div>
-            </div>
-        """, unsafe_allow_html=True)
-    with col3:
-        st.markdown(f"""
-            <div class="metric-card">
-                <div class="metric-label">Semantic Text Chunks</div>
-                <div class="metric-value">{st.session_state.doc_stats['chunks']}</div>
-            </div>
-        """, unsafe_allow_html=True)
-    st.divider()
-
-# 5. Core Chat Pipeline Interface Render
-if st.session_state.rag_chain is None:
-    if not has_api_key:
-        st.warning("🔒 The workspace is locked. Provide a valid `GROQ_API_KEY` in the configuration panel to continue.")
-    else:
-        st.info("💡 Please upload a textbook PDF in the sidebar file uploader to activate your personal AI Tutor.")
-else:
-    # Render historical content logging blocks sequentially
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-
-# Track user processing streams
-chat_placeholder = "What concept would you like explained?" if has_api_key else "Chat disabled. Setup an authentication token key."
-
-if user_query := st.chat_input(chat_placeholder, disabled=not has_api_key):
-    if st.session_state.rag_chain is not None:
+    # 1. Show user message
+    st.session_state.messages.append({"role": "user", "content": user_query})
+    with st.chat_message("user"):
+        st.markdown(user_query)
         
-        # Immediate echo feedback stream block
-        with st.chat_message("user"):
-            st.markdown(user_query)
-        st.session_state.messages.append({"role": "user", "content": user_query})
-        
-        # Downstream prompt query processing via Groq pipeline
-        with st.chat_message("assistant"):
-            with st.spinner("Flipping through textbook pages..."):
-                response = st.session_state.rag_chain.invoke({"input": user_query})
-                answer = response["answer"]
-                st.markdown(answer)
+    # 2. Execute RAG pipeline safely
+    with st.chat_message("assistant"):
+        with st.spinner("Searching document layers..."):
+            try:
+                # Running the new safe hugging face engine loop
+                response = st.session_state.rag_chain.invoke(user_query)
+                st.markdown(response)
                 
-                # Traceable attribution framework
-                with st.expander("🔍 View Textbook Sources Used"):
-                    for doc in response["context"]:
-                        page = doc.metadata.get("page", 0) + 1
-                        st.write(f"**From Page {page}:**")
-                        st.caption(f"_{doc.page_content[:300]}..._")
-                        st.divider()
-                        
-        st.session_state.messages.append({"role": "assistant", "content": answer})
+                # Append to history state
+                st.session_state.messages.append({"role": "assistant", "content": response})
+                
+            except Exception as e:
+                st.error(f"Pipeline error running Hugging Face model: {e}")
+                st.info("💡 Tip: Verify your HF_TOKEN permissions or network rate-limits on Hugging Face console.")
