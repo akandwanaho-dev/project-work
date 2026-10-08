@@ -1,4 +1,5 @@
 streamlit>=1.63,<2
+supabase>=2.0
 huggingface-hub>=0.35
 langchain-core>=0.3,<2
 langchain-community>=0.3,<2
