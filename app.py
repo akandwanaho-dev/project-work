@@ -9,6 +9,7 @@ from datetime import datetime
 import pandas as pd
 import requests
 import streamlit as st
+from supabase import create_client
 from docx import Document as DocxDocument
 from huggingface_hub import InferenceClient
 from pypdf import PdfReader
@@ -138,8 +139,15 @@ def init_state():
         "quiz": [],
         "quiz_answers": [],
         "quiz_submitted": False,
+        "quiz_history": [],
+        "quiz_topic": "",
+        "quiz_history_selected": None,
+        "active_view": "chat",
         "flashcards": [],
         "last_search_results": [],
+        "supabase": None,
+        "current_user": None,
+        "profile": {},
         "progress": {
             "questions_asked": 0,
             "quizzes_taken": 0,
@@ -153,6 +161,7 @@ def init_state():
             st.session_state[k] = v
 
 init_state()
+require_auth()
 
 # ============================================================
 # HELPERS
@@ -162,6 +171,182 @@ def secret(name, default=""):
         return st.secrets.get(name, default)
     except Exception:
         return os.getenv(name, default)
+
+
+def supabase_client():
+    url = secret("SUPABASE_URL")
+    key = secret("SUPABASE_ANON_KEY") or secret("SUPABASE_PUBLISHABLE_KEY")
+    if not url or not key:
+        return None
+    try:
+        return create_client(url, key)
+    except Exception:
+        return None
+
+
+def current_user():
+    return st.session_state.get("current_user")
+
+
+def load_user_data(sb, user_id):
+    try:
+        profile = sb.table("profiles").select("*").eq("id", user_id).maybe_single().execute()
+        st.session_state.profile = profile.data or {}
+    except Exception:
+        st.session_state.profile = {}
+    try:
+        chats = sb.table("chats").select("*").eq("user_id", user_id).order("updated_at", desc=True).execute().data or []
+        sessions = {}
+        for chat in chats:
+            rows = sb.table("messages").select("*").eq("chat_id", chat["id"]).order("created_at").execute().data or []
+            sessions[chat["title"]] = [{"role": r["role"], "content": r["content"]} for r in rows if r["role"] in ("user", "assistant")]
+        if sessions:
+            st.session_state.chat_sessions = sessions
+            first = next(iter(sessions))
+            st.session_state.active_chat = first
+            st.session_state.messages = sessions[first]
+    except Exception:
+        pass
+    try:
+        books = sb.table("books").select("*").eq("user_id", user_id).order("created_at", desc=True).execute().data or []
+        for b in books:
+            name = b.get("file_name") or b.get("title") or "Untitled book"
+            st.session_state.books[name] = {"name": name, "hash": b.get("id", sha(name.encode())), "pages": b.get("page_count") or 0, "chunks": 0, "size_mb": 0, "subject": b.get("subject") or "", "db_id": b.get("id"), "persisted_only": True}
+    except Exception:
+        pass
+    try:
+        quizzes = sb.table("quizzes").select("*").eq("user_id", user_id).order("created_at", desc=True).execute().data or []
+        st.session_state.quiz_history = [{"id": q["id"], "topic": q.get("topic") or q.get("title") or "Untitled quiz", "score": q.get("score",0), "questions": [], "answers": [], "submitted": q.get("completed",False), "date": (q.get("created_at") or "")[:16].replace("T"," ")} for q in quizzes]
+    except Exception:
+        pass
+    try:
+        cards = sb.table("flashcards").select("*").eq("user_id", user_id).order("created_at", desc=True).execute().data or []
+        st.session_state.flashcards = [{"front": c["question"], "back": c["answer"], "source": c.get("subject") or "Textbook"} for c in cards]
+    except Exception:
+        pass
+    try:
+        rows = sb.table("progress").select("*").eq("user_id", user_id).execute().data or []
+        st.session_state.progress["topics"] = defaultdict(int)
+        for row in rows:
+            st.session_state.progress["topics"][f'{row.get("subject","General")}: {row.get("topic","Unknown")}'] = row.get("questions_answered",0)
+    except Exception:
+        pass
+
+
+def save_profile(full_name=None, school=None, class_level=None):
+    sb=st.session_state.get("supabase"); user=current_user()
+    if not sb or not user: return
+    payload={"id":user.id,"email":user.email}
+    if full_name is not None: payload["full_name"]=full_name
+    if school is not None: payload["school"]=school
+    if class_level is not None: payload["class_level"]=class_level
+    try:
+        sb.table("profiles").upsert(payload).execute(); st.session_state.profile.update(payload)
+    except Exception as e: st.warning(f"Could not save profile: {e}")
+
+
+def save_chat_to_db(chat_name, messages):
+    sb=st.session_state.get("supabase"); user=current_user()
+    if not sb or not user: return
+    try:
+        existing=sb.table("chats").select("id").eq("user_id",user.id).eq("title",chat_name).limit(1).execute().data or []
+        if existing:
+            chat_id=existing[0]["id"]; sb.table("chats").update({"updated_at":datetime.now().isoformat()}).eq("id",chat_id).execute(); sb.table("messages").delete().eq("chat_id",chat_id).execute()
+        else:
+            chat_id=sb.table("chats").insert({"user_id":user.id,"title":chat_name}).execute().data[0]["id"]
+        payload=[{"chat_id":chat_id,"user_id":user.id,"role":m["role"],"content":m["content"]} for m in messages if m.get("role") in ("user","assistant") and m.get("content")]
+        if payload: sb.table("messages").insert(payload).execute()
+    except Exception: pass
+
+
+def save_book_to_db(name, meta):
+    sb=st.session_state.get("supabase"); user=current_user()
+    if not sb or not user: return
+    try:
+        result=sb.table("books").insert({"user_id":user.id,"title":name,"file_name":name,"file_path":"","subject":meta.get("subject",""),"page_count":int(meta.get("pages",0) or 0),"indexed":True}).execute()
+        if result.data: meta["db_id"]=result.data[0]["id"]
+    except Exception: pass
+
+
+def delete_book_from_db(meta):
+    sb=st.session_state.get("supabase"); user=current_user()
+    if not sb or not user: return
+    try:
+        if meta.get("db_id"): sb.table("books").delete().eq("id",meta["db_id"]).eq("user_id",user.id).execute()
+    except Exception: pass
+
+
+def save_quiz_to_db(topic, score, total):
+    sb=st.session_state.get("supabase"); user=current_user()
+    if not sb or not user: return None
+    try:
+        row=sb.table("quizzes").insert({"user_id":user.id,"title":topic or "Untitled quiz","topic":topic or "General","score":int(score),"total_questions":int(total),"completed":True}).execute().data
+        return row[0]["id"] if row else None
+    except Exception: return None
+
+
+def save_flashcards_to_db(cards, topic):
+    sb=st.session_state.get("supabase"); user=current_user()
+    if not sb or not user or not cards: return
+    try:
+        rows=[{"user_id":user.id,"question":c.get("front",""),"answer":c.get("back",""),"subject":st.session_state.get("subject_setting","General"),"topic":topic} for c in cards if c.get("front") and c.get("back")]
+        if rows: sb.table("flashcards").insert(rows).execute()
+    except Exception: pass
+
+
+def save_progress_to_db(subject, topic, questions, correct):
+    sb=st.session_state.get("supabase"); user=current_user()
+    if not sb or not user: return
+    try:
+        existing=sb.table("progress").select("*").eq("user_id",user.id).eq("subject",subject).eq("topic",topic).limit(1).execute().data or []
+        if existing:
+            row=existing[0]; qa=int(row.get("questions_answered",0))+int(questions); ca=int(row.get("correct_answers",0))+int(correct)
+            sb.table("progress").update({"questions_answered":qa,"correct_answers":ca,"mastery":round(100*ca/max(1,qa),2),"last_studied":datetime.now().isoformat()}).eq("id",row["id"]).execute()
+        else:
+            sb.table("progress").insert({"user_id":user.id,"subject":subject,"topic":topic or "General","questions_answered":int(questions),"correct_answers":int(correct),"mastery":round(100*int(correct)/max(1,int(questions)),2)}).execute()
+    except Exception: pass
+
+
+def auth_screen():
+    sb=st.session_state.get("supabase")
+    st.markdown('<div style="max-width:520px;margin:8vh auto 0;text-align:center"><div style="font-size:3rem">📚</div><h1 style="margin:.25rem 0">Textbook AI</h1><p style="opacity:.65">Your personal textbook study workspace</p></div>',unsafe_allow_html=True)
+    if sb is None:
+        st.error("Supabase is not connected. Add SUPABASE_URL and SUPABASE_ANON_KEY to Streamlit Secrets.")
+        st.code('SUPABASE_URL = "https://your-project.supabase.co"\nSUPABASE_ANON_KEY = "your-client-safe-key"',language="toml"); st.stop()
+    login_tab,signup_tab=st.tabs(["Log in","Create account"])
+    with login_tab:
+        with st.form("login_form"):
+            email=st.text_input("Email",placeholder="student@example.com"); password=st.text_input("Password",type="password")
+            submitted=st.form_submit_button("Log in",type="primary",use_container_width=True)
+        if submitted:
+            if not email or not password: st.error("Enter your email and password.")
+            else:
+                try:
+                    result=sb.auth.sign_in_with_password({"email":email.strip(),"password":password})
+                    if result.user:
+                        st.session_state.current_user=result.user; st.session_state.supabase=sb; load_user_data(sb,result.user.id); st.rerun()
+                except Exception as e: st.error(f"Login failed: {e}")
+    with signup_tab:
+        with st.form("signup_form"):
+            full_name=st.text_input("Full name",placeholder="Your name"); email=st.text_input("Email",placeholder="student@example.com",key="signup_email"); password=st.text_input("Password",type="password",key="signup_password"); confirm=st.text_input("Confirm password",type="password")
+            submitted=st.form_submit_button("Create account",type="primary",use_container_width=True)
+        if submitted:
+            if not full_name.strip() or not email.strip() or not password: st.error("Complete all fields.")
+            elif password!=confirm: st.error("Passwords do not match.")
+            elif len(password)<6: st.error("Use a password with at least 6 characters.")
+            else:
+                try:
+                    result=sb.auth.sign_up({"email":email.strip(),"password":password,"options":{"data":{"full_name":full_name.strip()}}})
+                    if result.user and result.session:
+                        st.session_state.current_user=result.user; st.session_state.supabase=sb; load_user_data(sb,result.user.id); st.success("Account created."); st.rerun()
+                    else: st.success("Account created. Check your email to confirm your account, then log in.")
+                except Exception as e: st.error(f"Sign-up failed: {e}")
+
+
+def require_auth():
+    if st.session_state.get("supabase") is None: st.session_state.supabase=supabase_client()
+    if st.session_state.get("current_user") is not None: return True
+    auth_screen(); st.stop()
 
 
 def sha(data: bytes) -> str:
@@ -448,105 +633,167 @@ def tavily_search(query):
     return [{"title": x.get("title", "Web result"), "url": x.get("url", ""), "content": x.get("content", "")} for x in r.json().get("results", [])]
 
 # ============================================================
+# CHATGPT-STYLE WORKSPACE
+# ============================================================
+# Navigation state is kept in session so the main area is focused on the
+# selected workspace while the sidebar contains the controls/features.
+
+def set_view(view):
+    st.session_state.active_view = view
+
+
+def new_chat():
+    name = f"New chat {len(st.session_state.chat_sessions) + 1}"
+    st.session_state.chat_sessions[name] = []
+    st.session_state.active_chat = name
+    st.session_state.messages = st.session_state.chat_sessions[name]
+    st.session_state.active_view = "chat"
+
+
+# ============================================================
 # SIDEBAR
 # ============================================================
 with st.sidebar:
-    # Brand
+    user=current_user()
+    profile_name=(st.session_state.get("profile") or {}).get("full_name") or (user.email.split("@")[0] if user and user.email else "Student")
     st.markdown("""
-    <div class="sidebar-brand">
-        <div class="sidebar-logo">📚</div>
-        <div>
-            <div class="sidebar-title">Textbook AI</div>
-            <div class="sidebar-subtitle">Your personal study workspace</div>
-        </div>
+    <div class="chatgpt-brand">
+        <div class="brand-mark">📚</div>
+        <div class="brand-name">Textbook AI</div>
     </div>
     """, unsafe_allow_html=True)
-
-    token_ready = bool(secret("HF_TOKEN"))
-    if token_ready:
-        st.markdown('<div class="status-pill"><span class="status-dot"></span><span class="status-text">AI connection ready</span></div>', unsafe_allow_html=True)
-    else:
-        st.markdown('<div class="status-pill"><span class="status-dot off"></span><span class="status-text">Add HF_TOKEN in Secrets</span></div>', unsafe_allow_html=True)
-
-    # New chat — the primary sidebar action
-    if st.button("＋  New chat", key="new_chat_primary", use_container_width=True):
-        name = f"Chat {len(st.session_state.chat_sessions) + 1}"
-        st.session_state.chat_sessions[name] = []
-        st.session_state.active_chat = name
-        st.session_state.messages = st.session_state.chat_sessions[name]
+    st.markdown(f'<div class="student-account"><div class="student-avatar">{profile_name[:1].upper()}</div><div><div class="student-name">{profile_name}</div><div class="student-email">{user.email if user else ""}</div></div></div>', unsafe_allow_html=True)
+    if st.button("🚪  Log out", key="logout_button", use_container_width=True):
+        try: st.session_state.supabase.auth.sign_out()
+        except Exception: pass
+        for key in ["current_user","profile","supabase"]: st.session_state.pop(key,None)
+        st.session_state.books={}; st.session_state.documents=[]; st.session_state.vectorstore=None; st.session_state.messages=[]; st.session_state.chat_sessions={"New Chat":[]}; st.session_state.active_chat="New Chat"
         st.rerun()
 
-    st.divider()
+    token_ready = bool(secret("HF_TOKEN"))
 
-    # Recent chats
-    st.markdown('<div class="sidebar-section-label">Recent chats</div>', unsafe_allow_html=True)
-    chat_names = list(st.session_state.chat_sessions.keys())
-    if not chat_names:
-        st.caption("No conversations yet.")
-    else:
-        for chat_name in chat_names[-8:][::-1]:
-            is_active = chat_name == st.session_state.active_chat
-            label = ("●  " if is_active else "○  ") + chat_name
-            if st.button(label, key=f"chat_open_{hashlib.md5(chat_name.encode()).hexdigest()}", use_container_width=True):
-                st.session_state.active_chat = chat_name
-                st.session_state.messages = st.session_state.chat_sessions[chat_name]
-                st.rerun()
+    if st.button("✎  New chat", key="sidebar_new_chat", use_container_width=True):
+        new_chat()
+        st.rerun()
 
-    with st.expander("＋ Name a new chat", expanded=False):
-        new_name = st.text_input("Chat name", placeholder="e.g. Organic Chemistry", key="new_chat_name", label_visibility="collapsed")
-        if st.button("Create chat", key="create_named_chat", use_container_width=True):
-            name = new_name.strip() or f"Chat {len(st.session_state.chat_sessions)+1}"
-            st.session_state.chat_sessions.setdefault(name, [])
-            st.session_state.active_chat = name
-            st.session_state.messages = st.session_state.chat_sessions[name]
+    st.markdown('<div class="nav-label">Study</div>', unsafe_allow_html=True)
+    nav_items = [
+        ("💬", "Chat", "chat"),
+        ("🔎", "Search textbooks", "search"),
+        ("🎴", "Flashcards", "flashcards"),
+        ("📊", "Progress", "progress"),
+        ("ℹ️", "Help & setup", "help"),
+    ]
+    for icon, label, view in nav_items:
+        active = st.session_state.active_view == view
+        if st.button(f"{icon}  {label}", key=f"nav_{view}", use_container_width=True, type="primary" if active else "secondary"):
+            set_view(view)
             st.rerun()
 
-    if st.session_state.chat_sessions:
-        if st.button("Clear current chat", key="clear_chat", use_container_width=True):
-            st.session_state.chat_sessions[st.session_state.active_chat] = []
-            st.session_state.messages = st.session_state.chat_sessions[st.session_state.active_chat]
-            st.rerun()
-
-    st.divider()
-
-    # Library
-    book_count = len(st.session_state.books)
-    st.markdown(f'<div class="sidebar-section-label">Textbook library <span class="sidebar-count">{book_count}</span></div>', unsafe_allow_html=True)
-    with st.expander("📥  Add textbooks", expanded=book_count == 0):
+    # --------------------------------------------------------
+    # BOOKS — all textbook management lives here
+    # --------------------------------------------------------
+    st.markdown('<div class="nav-section-title">📚 Books</div>', unsafe_allow_html=True)
+    with st.expander(f"Your books  ·  {len(st.session_state.books)}", expanded=True):
         uploads = st.file_uploader(
-            "Upload PDF, DOCX, TXT or Markdown files",
+            "Add textbooks",
             type=["pdf", "docx", "txt", "md"],
             accept_multiple_files=True,
             key="textbook_uploader",
+            label_visibility="visible",
         )
         if uploads:
-            st.caption(f"{len(uploads)} file(s) selected")
-        if st.button("Index textbooks", key="index_textbooks", use_container_width=True, disabled=not uploads):
+            st.caption(f"{len(uploads)} file(s) ready to add")
+        if st.button("＋ Add & index books", key="index_textbooks", use_container_width=True, disabled=not uploads):
             try:
-                with st.spinner("Building textbook index..."):
+                with st.spinner("Indexing textbooks..."):
                     n = index_uploads(uploads)
-                st.success(f"Indexed {n} new textbook(s)." if n else "No new files to index.")
+                    for uploaded_name, meta in list(st.session_state.books.items()):
+                        if not meta.get("db_id"): save_book_to_db(uploaded_name, meta)
+                st.success(f"Added {n} new book(s)." if n else "No new books added.")
                 st.rerun()
             except Exception as e:
                 st.error(f"Indexing error: {e}")
 
-    if st.session_state.books:
-        for name, meta in list(st.session_state.books.items()):
-            with st.expander(f"📘  {name}", expanded=False):
-                st.caption(f"{meta['size_mb']} MB  •  {meta['pages']} pages/sections")
-                st.caption(f"{meta['chunks']} indexed passages")
-                st.caption(f"Added {meta['uploaded']}")
-                if st.button("Remove textbook", key=f"rm_{meta['hash']}", use_container_width=True):
+        if st.session_state.books:
+            st.markdown('<div class="book-list">', unsafe_allow_html=True)
+            for name, meta in list(st.session_state.books.items()):
+                st.markdown(f'<div class="book-item"><div class="book-icon">📘</div><div class="book-info"><div class="book-name">{name}</div><div class="book-meta">{meta["pages"]} pages · {meta["chunks"]} passages</div></div></div>', unsafe_allow_html=True)
+                bc1, bc2 = st.columns(2)
+                if bc1.button("Open", key=f"open_book_{meta['hash']}", use_container_width=True):
+                    st.session_state.active_view = "chat"
+                    st.session_state.selected_books = [name]
+                    st.rerun()
+                if bc2.button("Delete", key=f"rm_{meta['hash']}", use_container_width=True):
+                    delete_book_from_db(meta)
                     remove_book(name)
                     st.rerun()
+            st.markdown('</div>', unsafe_allow_html=True)
+        else:
+            st.caption("No books yet. Upload your school textbooks to build your private study library.")
+
+    # --------------------------------------------------------
+    # QUIZZES — history + new quiz controls live here
+    # --------------------------------------------------------
+    st.markdown('<div class="nav-section-title">📝 Quizzes</div>', unsafe_allow_html=True)
+    with st.expander(f"Quiz center  ·  {len(st.session_state.quiz_history)} saved", expanded=True):
+        if st.button("＋ New quiz", key="sidebar_new_quiz", use_container_width=True):
+            st.session_state.active_view = "quiz"
+            st.session_state.quiz = []
+            st.session_state.quiz_submitted = False
+            st.session_state.quiz_answers = []
+            st.rerun()
+
+        if st.session_state.quiz_history:
+            st.caption("Previous quizzes")
+            for i, item in enumerate(st.session_state.quiz_history[-6:][::-1]):
+                title = item.get("topic", "Untitled quiz")
+                score = item.get("score")
+                label = f"{title[:27]}" + (f"  ·  {score}%" if score is not None else "")
+                if st.button(f"📋  {label}", key=f"quiz_history_{i}_{item.get('id', i)}", use_container_width=True):
+                    st.session_state.quiz = item.get("questions", [])
+                    st.session_state.quiz_answers = item.get("answers", [])
+                    st.session_state.quiz_submitted = item.get("submitted", False)
+                    st.session_state.quiz_topic = title
+                    st.session_state.quiz_history_selected = item.get("id")
+                    st.session_state.active_view = "quiz"
+                    st.rerun()
+        else:
+            st.caption("Your completed quizzes will appear here.")
+
+    # --------------------------------------------------------
+    # CHAT HISTORY
+    # --------------------------------------------------------
+    st.markdown('<div class="nav-section-title">💬 Chats</div>', unsafe_allow_html=True)
+    chat_names = [n for n in st.session_state.chat_sessions.keys() if st.session_state.chat_sessions[n] or n == st.session_state.active_chat]
+    if not chat_names:
+        st.caption("No conversations yet.")
     else:
-        st.markdown('<div class="sidebar-help">Upload your school textbooks here. The AI will search them before answering.</div>', unsafe_allow_html=True)
+        for chat_name in chat_names[-8:][::-1]:
+            active = chat_name == st.session_state.active_chat
+            prefix = "●  " if active else "   "
+            if st.button(prefix + chat_name, key=f"chat_open_{hashlib.md5(chat_name.encode()).hexdigest()}", use_container_width=True, type="primary" if active else "secondary"):
+                st.session_state.active_chat = chat_name
+                st.session_state.messages = st.session_state.chat_sessions[chat_name]
+                st.session_state.active_view = "chat"
+                st.rerun()
 
-    st.divider()
+    if st.button("🗑  Clear current chat", key="clear_chat", use_container_width=True):
+        st.session_state.chat_sessions[st.session_state.active_chat] = []
+        st.session_state.messages = st.session_state.chat_sessions[st.session_state.active_chat]
+        st.rerun()
 
-    # Settings
-    st.markdown('<div class="sidebar-section-label">Preferences</div>', unsafe_allow_html=True)
-    with st.expander("⚙️  Model & answer settings", expanded=False):
+    # --------------------------------------------------------
+    # SETTINGS — compact, at the bottom of the sidebar
+    # --------------------------------------------------------
+    with st.expander("👤  Student profile", expanded=False):
+        new_name=st.text_input("Full name",value=profile_name,key="profile_name_setting")
+        new_school=st.text_input("School",value=(st.session_state.get("profile") or {}).get("school", ""),key="profile_school_setting")
+        new_class=st.text_input("Class / level",value=(st.session_state.get("profile") or {}).get("class_level", ""),key="profile_class_setting")
+        if st.button("Save profile",key="save_profile_button",use_container_width=True):
+            save_profile(new_name.strip(),new_school.strip(),new_class.strip()); st.success("Profile saved.")
+
+    with st.expander("⚙️  Settings", expanded=False):
         model = st.text_input(
             "Hugging Face chat model",
             value=secret("HF_MODEL", DEFAULT_LLM_MODEL) or DEFAULT_LLM_MODEL,
@@ -555,40 +802,48 @@ with st.sidebar:
         temperature = st.slider("Creativity", 0.0, 1.0, .35, .05, key="temperature_setting")
         answer_length = st.selectbox("Answer length", ["Short", "Medium", "Detailed"], index=1, key="answer_length_setting")
         teaching_level = st.selectbox("Student level", ["Beginner", "Secondary School", "Advanced"], index=1, key="teaching_level_setting")
+        subject = st.selectbox("Subject tutor", list(SUBJECTS), key="subject_setting")
+        study_mode = st.selectbox("Study mode", list(STUDY_MODES), key="study_mode_setting")
+        source_mode = st.selectbox("Knowledge mode", ["Textbook only", "Textbook + general knowledge", "Textbook + web research"], key="source_mode_setting")
+        retrieval_k = st.slider("Retrieved passages", 3, 10, 6, key="retrieval_k_setting")
 
-    st.markdown('<div class="sidebar-help">🔒 API keys stay in Streamlit Secrets. Never paste them directly into this file.</div>', unsafe_allow_html=True)
+    if token_ready:
+        st.markdown('<div class="connection"><span class="connection-dot"></span> AI connection ready</div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="connection connection-off"><span class="connection-dot"></span> Add HF_TOKEN in Secrets</div>', unsafe_allow_html=True)
 
-# ============================================================
-# MAIN
-# ============================================================
-st.markdown("""
-<div class="hero"><h1>📚 Textbook AI</h1><p>Upload textbooks, ask grounded questions, generate quizzes and flashcards, search your library, and track revision progress.</p></div>
-""", unsafe_allow_html=True)
+# Keep settings accessible to retrieval/chat logic.
+selected_books = st.session_state.get("selected_books", list(st.session_state.books))
+selected_books = [b for b in selected_books if b in st.session_state.books]
+if not selected_books and st.session_state.books:
+    selected_books = list(st.session_state.books)
+st.session_state.selected_books = selected_books
 
-book_names = list(st.session_state.books)
-selected_books = st.multiselect("Search in textbooks", book_names, default=book_names)
 chapters = sorted({d.metadata.get("chapter", "Unknown chapter") for d in st.session_state.documents if not selected_books or d.metadata.get("source") in selected_books})
-
-with st.expander("🎛️ Study controls"):
-    c1, c2, c3, c4 = st.columns(4)
-    subject = c1.selectbox("Subject tutor", list(SUBJECTS))
-    study_mode = c2.selectbox("Study mode", list(STUDY_MODES))
-    source_mode = c3.selectbox("Knowledge mode", ["Textbook only", "Textbook + general knowledge", "Textbook + web research"])
-    retrieval_k = c4.slider("Retrieved passages", 3, 10, 6)
-    selected_chapters = st.multiselect("Limit to chapters/topics", chapters, default=[])
+selected_chapters = st.session_state.get("selected_chapters", [])
+selected_chapters = [c for c in selected_chapters if c in chapters]
+st.session_state.selected_chapters = selected_chapters
 
 if source_mode == "Textbook + web research" and not secret("TAVILY_API_KEY"):
-    st.info("Web research requires TAVILY_API_KEY in Streamlit Secrets. Without it, the app falls back to textbook + general knowledge.")
+    # Don't interrupt the ChatGPT-like main chat. The settings panel is enough.
+    pass
 
-tab_chat, tab_search, tab_quiz, tab_cards, tab_progress, tab_help = st.tabs(["💬 Chat", "🔎 Search", "📝 Quiz", "🎴 Flashcards", "📊 Progress", "ℹ️ Help"])
+# ============================================================
+# MAIN CONTENT
+# ============================================================
+view = st.session_state.active_view
 
-# CHAT
-with tab_chat:
+if view == "chat":
+    # Clean ChatGPT-like conversation surface: no tabs, no study controls.
     if not st.session_state.messages:
-        a,b,c = st.columns(3)
-        a.info("**Explain a topic**\n\nExplain mitosis in simple terms.")
-        b.info("**Exam preparation**\n\nGive me revision notes on electrolysis.")
-        c.info("**Step-by-step**\n\nShow how to solve this quadratic equation.")
+        st.markdown('<div class="welcome"><h1>📚</h1><h2>How can I help you study?</h2><p>Ask questions about your textbooks, request explanations, solve problems, or prepare for exams.</p></div>', unsafe_allow_html=True)
+        if not st.session_state.books:
+            st.info("Start by adding a textbook from **📚 Books** in the sidebar.")
+        else:
+            s1, s2, s3 = st.columns(3)
+            s1.markdown("**Explain a topic**\n\nTry: *Explain mitosis simply.*")
+            s2.markdown("**Prepare for an exam**\n\nTry: *Make revision notes on electrolysis.*")
+            s3.markdown("**Solve a problem**\n\nTry: *Show the steps for this quadratic.*")
 
     for m in st.session_state.messages:
         avatar = "🧑‍🎓" if m["role"] == "user" else "📚"
@@ -600,32 +855,30 @@ with tab_chat:
                         st.markdown(f"<div class='source-card'><b>{s['source']}</b> — page/section {s['page']}<br><span class='small-muted'>{s['chapter']}</span><br><br>{s['excerpt']}</div>", unsafe_allow_html=True)
             if m.get("web_sources"):
                 with st.expander("🌐 Web sources"):
-                    for i,s in enumerate(m["web_sources"],1):
+                    for i, s in enumerate(m["web_sources"], 1):
                         st.markdown(f"{i}. [{s['title']}]({s['url']})")
 
-    with st.expander("🎤 Ask by voice"):
+    with st.expander("🎤 Voice question", expanded=False):
         audio = st.audio_input("Record a question")
-        if audio and st.button("Transcribe recording"):
+        if audio and st.button("Transcribe recording", key="transcribe_voice"):
             try:
                 with st.spinner("Transcribing..."):
                     st.session_state.voice_transcript = transcribe(audio.getvalue())
                 st.success(st.session_state.voice_transcript)
             except Exception as e:
                 st.error(f"Voice transcription failed: {e}")
-        if st.session_state.get("voice_transcript"):
-            st.code(st.session_state.voice_transcript)
 
-    prompt = st.chat_input("Ask about your textbooks...", accept_file=True, file_type=["png","jpg","jpeg"], disabled=not token_ready)
+    prompt = st.chat_input("Ask anything about your textbooks...", accept_file=True, file_type=["png", "jpg", "jpeg"], disabled=not token_ready)
     if prompt:
         if isinstance(prompt, str):
             query, attached = prompt, []
         else:
             query, attached = prompt.text or "", list(prompt.files or [])
         if attached:
-            st.warning("Image attachment received, but this text-only Llama backend cannot inspect images yet. Type the question shown in the image or switch to a vision-language model.")
+            st.warning("Image attachment received, but this text-only Llama backend cannot inspect images yet.")
         if query.strip():
             query = query.strip()
-            st.session_state.messages.append({"role":"user","content":query})
+            st.session_state.messages.append({"role": "user", "content": query})
             st.session_state.chat_sessions[st.session_state.active_chat] = st.session_state.messages
             with st.chat_message("user", avatar="🧑‍🎓"):
                 st.markdown(query)
@@ -635,57 +888,60 @@ with tab_chat:
                         docs = retrieve(query, selected_books, selected_chapters, retrieval_k)
                         web_results = []
                         effective = source_mode
-                        if source_mode == "Textbook + web research":
-                            if secret("TAVILY_API_KEY"):
-                                web_results = tavily_search(query)
-                            else:
-                                effective = "Textbook + general knowledge"
+                        if source_mode == "Textbook + web research" and secret("TAVILY_API_KEY"):
+                            web_results = tavily_search(query)
+                        elif source_mode == "Textbook + web research":
+                            effective = "Textbook + general knowledge"
                         response = answer_question(query, docs, study_mode, subject, answer_length, effective, st.session_state.messages[:-1], model, temperature, web_results)
                     st.markdown(response)
                     sources = source_cards(docs)
                     if sources:
                         with st.expander("📖 Sources used"):
-                            for s in sources:
-                                st.markdown(f"**{s['source']}** — page/section {s['page']}  \n*{s['chapter']}*")
+                            for src in sources:
+                                st.markdown(f"**{src['source']}** — page/section {src['page']}  \n*{src['chapter']}*")
                     if web_results:
                         with st.expander("🌐 Web sources used"):
-                            for i,s in enumerate(web_results,1):
-                                st.markdown(f"{i}. [{s['title']}]({s['url']})")
-                    st.session_state.messages.append({"role":"assistant","content":response,"sources":sources,"web_sources":web_results})
+                            for i, src in enumerate(web_results, 1):
+                                st.markdown(f"{i}. [{src['title']}]({src['url']})")
+                    st.session_state.messages.append({"role": "assistant", "content": response, "sources": sources, "web_sources": web_results})
                     st.session_state.chat_sessions[st.session_state.active_chat] = st.session_state.messages
+                    save_chat_to_db(st.session_state.active_chat, st.session_state.messages)
                     st.session_state.progress["questions_asked"] += 1
                     st.session_state.progress["topics"][query[:60]] += 1
                 except Exception as e:
                     st.error(f"AI error: {e}")
 
-# SEARCH
-with tab_search:
-    st.markdown("### 🔎 Search your textbook library")
-    sq = st.text_input("Search phrase or concept", placeholder="e.g. osmosis")
-    nres = st.slider("Number of results", 3, 15, 8, key="nres")
-    if st.button("Search textbooks", disabled=not sq.strip()):
+elif view == "search":
+    st.title("🔎 Search textbooks")
+    st.caption("Search across the books in your library. Book selection is managed from the sidebar.")
+    sq = st.text_input("Search phrase or concept", placeholder="e.g. osmosis, Newton's laws, quadratic equations")
+    nres = st.slider("Number of results", 3, 15, 8)
+    if st.button("Search", type="primary", disabled=not sq.strip()):
         if st.session_state.vectorstore is None:
-            st.warning("Upload and index a textbook first.")
+            st.warning("Add and index a textbook from the sidebar first.")
         else:
             st.session_state.last_search_results = retrieve(sq, selected_books, selected_chapters, nres)
-    for i,d in enumerate(st.session_state.last_search_results,1):
-        with st.expander(f"{i}. {d.metadata.get('source')} — page/section {d.metadata.get('page')}", expanded=i<=3):
+    for i, d in enumerate(st.session_state.last_search_results, 1):
+        with st.expander(f"{i}. {d.metadata.get('source')} — page/section {d.metadata.get('page')}", expanded=i <= 3):
             st.caption(d.metadata.get("chapter"))
             st.write(d.page_content)
 
-# QUIZ
-with tab_quiz:
-    st.markdown("### 📝 Generate a textbook quiz")
-    q1,q2,q3 = st.columns([2,1,1])
-    topic = q1.text_input("Quiz topic", placeholder="e.g. Cell division")
-    qcount = q2.selectbox("Questions", [3,5,8,10], index=1)
-    difficulty = q3.selectbox("Difficulty", ["Easy","Medium","Hard"], index=1)
-    if st.button("✨ Generate quiz", disabled=not topic.strip()):
+elif view == "quiz":
+    st.title("📝 Quiz center")
+    st.caption("Generate quizzes from your textbook library or reopen one of your previous quizzes from the sidebar.")
+    q1, q2, q3 = st.columns([2, 1, 1])
+    topic = q1.text_input("Quiz topic", value=st.session_state.get("quiz_topic", ""), placeholder="e.g. Cell division")
+    qcount = q2.selectbox("Questions", [3, 5, 8, 10], index=1)
+    difficulty = q3.selectbox("Difficulty", ["Easy", "Medium", "Hard"], index=1)
+    if st.button("✨ Generate new quiz", type="primary", disabled=not topic.strip()):
         try:
-            docs = retrieve(topic, selected_books, selected_chapters, min(10,retrieval_k+2))
+            docs = retrieve(topic, selected_books, selected_chapters, min(10, retrieval_k + 2))
             with st.spinner("Generating quiz..."):
                 st.session_state.quiz = make_quiz(topic, docs, qcount, difficulty, model)
+            st.session_state.quiz_topic = topic
+            st.session_state.quiz_answers = []
             st.session_state.quiz_submitted = False
+            st.session_state.quiz_history_selected = None
             st.rerun()
         except Exception as e:
             st.error(f"Could not generate quiz: {e}")
@@ -693,86 +949,157 @@ with tab_quiz:
     if st.session_state.quiz:
         with st.form("quiz_form"):
             answers = []
-            for i,q in enumerate(st.session_state.quiz):
-                st.markdown(f"**{i+1}. {q['question']}**")
+            for i, q in enumerate(st.session_state.quiz):
+                st.markdown(f"**{i + 1}. {q['question']}**")
                 answers.append(st.radio("Choose", q["options"], key=f"qa_{i}", index=None, label_visibility="collapsed"))
                 st.divider()
             submitted = st.form_submit_button("Submit answers", use_container_width=True)
         if submitted:
             st.session_state.quiz_answers = answers
             st.session_state.quiz_submitted = True
-            correct = sum(a == q["options"][q["answer_index"]] for a,q in zip(answers, st.session_state.quiz))
+            correct = sum(a == q["options"][q["answer_index"]] for a, q in zip(answers, st.session_state.quiz))
+            total = len(st.session_state.quiz)
+            score = round(100 * correct / total) if total else 0
             st.session_state.progress["quizzes_taken"] += 1
             st.session_state.progress["quiz_correct"] += correct
-            st.session_state.progress["quiz_total"] += len(st.session_state.quiz)
+            st.session_state.progress["quiz_total"] += total
+            save_progress_to_db(subject, st.session_state.quiz_topic or "Quiz", total, correct)
+            db_quiz_id = save_quiz_to_db(st.session_state.quiz_topic or "Untitled quiz", score, total)
+            quiz_id = datetime.now().strftime("%Y%m%d%H%M%S%f")
+            st.session_state.quiz_history.append({
+                "id": db_quiz_id or quiz_id,
+                "topic": st.session_state.quiz_topic or "Untitled quiz",
+                "score": score,
+                "questions": st.session_state.quiz,
+                "answers": answers,
+                "submitted": True,
+                "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            })
+            st.rerun()
+
         if st.session_state.quiz_submitted:
             correct = 0
-            for i,q in enumerate(st.session_state.quiz):
+            for i, q in enumerate(st.session_state.quiz):
                 selected = st.session_state.quiz_answers[i] if i < len(st.session_state.quiz_answers) else None
                 right = q["options"][q["answer_index"]]
                 if selected == right:
                     correct += 1
-                    st.success(f"Question {i+1}: Correct")
+                    st.success(f"Question {i + 1}: Correct")
                 else:
-                    st.error(f"Question {i+1}: Correct answer — {right}")
+                    st.error(f"Question {i + 1}: Correct answer — {right}")
                 st.write(q.get("explanation", ""))
-                st.caption(f"Source: {q.get('source','Unknown')}")
-            st.metric("Quiz score", f"{round(100*correct/len(st.session_state.quiz))}%")
+                st.caption(f"Source: {q.get('source', 'Unknown')}")
+            st.metric("Quiz score", f"{round(100 * correct / len(st.session_state.quiz))}%")
 
-# FLASHCARDS
-with tab_cards:
-    st.markdown("### 🎴 Generate revision flashcards")
-    f1,f2 = st.columns([3,1])
+elif view == "flashcards":
+    st.title("🎴 Flashcards")
+    st.caption("Create compact revision cards from the textbooks in your library.")
+    f1, f2 = st.columns([3, 1])
     ftopic = f1.text_input("Flashcard topic", placeholder="e.g. Organic chemistry reactions")
-    fcount = f2.selectbox("Cards", [5,8,10,15], index=1)
-    if st.button("✨ Generate flashcards", disabled=not ftopic.strip()):
+    fcount = f2.selectbox("Cards", [5, 8, 10, 15], index=1)
+    if st.button("✨ Generate flashcards", type="primary", disabled=not ftopic.strip()):
         try:
-            docs = retrieve(ftopic, selected_books, selected_chapters, min(10,retrieval_k+2))
+            docs = retrieve(ftopic, selected_books, selected_chapters, min(10, retrieval_k + 2))
             with st.spinner("Creating flashcards..."):
                 st.session_state.flashcards = make_flashcards(ftopic, docs, fcount, model)
+                save_flashcards_to_db(st.session_state.flashcards, ftopic)
             st.rerun()
         except Exception as e:
             st.error(f"Could not create flashcards: {e}")
-    for i,c in enumerate(st.session_state.flashcards,1):
-        with st.expander(f"Card {i}: {c['front']}"):
-            st.markdown(c["back"])
-            st.caption(f"Source: {c.get('source','Unknown')}")
+    for i, card in enumerate(st.session_state.flashcards, 1):
+        with st.expander(f"Card {i}: {card['front']}"):
+            st.markdown(card["back"])
+            st.caption(f"Source: {card.get('source', 'Unknown')}")
 
-# PROGRESS
-with tab_progress:
-    st.markdown("### 📊 Study progress")
+elif view == "progress":
+    st.title("📊 Study progress")
     p = st.session_state.progress
-    acc = 100*p["quiz_correct"]/p["quiz_total"] if p["quiz_total"] else 0
-    a,b,c,d = st.columns(4)
+    acc = 100 * p["quiz_correct"] / p["quiz_total"] if p["quiz_total"] else 0
+    a, b, c, d = st.columns(4)
     a.metric("Questions asked", p["questions_asked"])
     b.metric("Quizzes taken", p["quizzes_taken"])
     c.metric("Quiz accuracy", f"{acc:.0f}%")
     d.metric("Textbooks", len(st.session_state.books))
     if st.session_state.books:
-        rows = [{"Textbook":m["name"],"Pages/sections":m["pages"],"Chunks":m["chunks"],"Size (MB)":m["size_mb"]} for m in st.session_state.books.values()]
+        rows = [{"Textbook": m["name"], "Pages/sections": m["pages"], "Chunks": m["chunks"], "Size (MB)": m["size_mb"]} for m in st.session_state.books.values()]
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    if st.session_state.quiz_history:
+        st.subheader("Quiz history")
+        rows = [{"Topic": x["topic"], "Score": f"{x['score']}%", "Date": x["date"]} for x in st.session_state.quiz_history[::-1]]
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     topics = dict(p["topics"])
     if topics:
-        rows = [{"Question/topic":k,"Times studied":v} for k,v in sorted(topics.items(), key=lambda x:x[1], reverse=True)[:10]]
+        st.subheader("Most studied topics")
+        rows = [{"Question/topic": k, "Times studied": v} for k, v in sorted(topics.items(), key=lambda x: x[1], reverse=True)[:10]]
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-# HELP
-with tab_help:
-    st.markdown("### ℹ️ Setup")
+elif view == "help":
+    st.title("ℹ️ Help & setup")
     st.markdown("""
-**Included:** multiple textbook uploads, FAISS RAG, local embeddings, page/section metadata, citations, subject tutors, study modes, quiz generation, flashcards, textbook search, session chat history, progress tracking, voice transcription, optional live web research, and image-attachment UI.
+### Getting started
+1. Open **📚 Books** in the sidebar and add your PDF, DOCX, TXT or Markdown textbooks.
+2. Ask questions from the main chat. Answers are grounded in the indexed textbook passages.
+3. Open **📝 Quizzes** to create a new quiz or reopen previous quizzes.
+4. Use **🔎 Search textbooks**, **🎴 Flashcards**, and **📊 Progress** from the sidebar.
+5. Use **⚙️ Settings** for subject, study mode, answer length and model options.
 
-**Streamlit Secrets:**
+### Streamlit Secrets
 ```toml
 HF_TOKEN = "hf_your_token_here"
-HF_MODEL = "meta-llama/Llama-3.1-8B-Instruct"  # optional
-TAVILY_API_KEY = "tvly_your_key_here"         # optional, for live web search
+HF_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
+TAVILY_API_KEY = "tvly_your_key_here"
 ```
 
-**Important limitations:**
-- Scanned/image-only PDFs need OCR; `pypdf` only extracts embedded text.
-- The current Llama backend is text-only, so photo understanding needs a vision-language model.
-- Library data, chats, FAISS index, and progress are stored in Streamlit session memory. Add a database/object store for true persistent accounts.
-- Hugging Face serverless model availability can change; set `HF_MODEL` to another chat-capable model if needed.
+**Important:** never hard-code API keys in `app.py` or commit them to GitHub.
+
+**Limitations:** scanned/image-only PDFs need OCR, the current Llama backend is text-only for images, student accounts and core metadata are persisted in Supabase; textbook file contents/indexes still need Supabase Storage for full cross-device RAG persistence.
 """)
-    st.warning("Never hard-code API keys in app.py or commit them to GitHub.")
+
+# ============================================================
+# CHATGPT-STYLE CSS
+# ============================================================
+# CSS is injected late as well so it reliably wins over Streamlit defaults.
+st.markdown("""
+<style>
+/* Overall ChatGPT-like dark workspace */
+.block-container{max-width:1050px;padding-top:1.6rem;padding-bottom:7.5rem}
+[data-testid="stSidebar"]{border-right:1px solid rgba(255,255,255,.08);background:#171717}
+[data-testid="stSidebar"]>div:first-child{padding:.7rem .55rem 1rem}
+[data-testid="stSidebar"] .block-container{padding:0}
+[data-testid="stSidebar"] hr{margin:.65rem .35rem;border-color:rgba(255,255,255,.08)}
+[data-testid="stSidebar"] .stButton>button{width:100%;border:0;border-radius:9px;background:transparent;text-align:left;min-height:2.35rem;padding:.48rem .65rem;font-weight:450;color:inherit;box-shadow:none}
+[data-testid="stSidebar"] .stButton>button:hover{background:rgba(255,255,255,.08)}
+[data-testid="stSidebar"] .stButton>button[kind="primary"]{background:rgba(255,255,255,.10)}
+[data-testid="stSidebar"] .stButton>button[kind="primary"]:hover{background:rgba(255,255,255,.13)}
+[data-testid="stSidebar"] .stExpander{border:0;background:transparent}
+[data-testid="stSidebar"] [data-testid="stExpanderDetails"]{padding:.35rem .25rem .55rem}
+[data-testid="stSidebar"] [data-testid="stExpanderToggleIcon"]{opacity:.7}
+[data-testid="stSidebar"] .stFileUploader{border-radius:9px}
+[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"]{padding:.55rem;background:rgba(255,255,255,.035);border:1px dashed rgba(255,255,255,.15);border-radius:9px}
+[data-testid="stSidebar"] .stCaption{font-size:.72rem}
+.chatgpt-brand{display:flex;align-items:center;gap:.55rem;padding:.45rem .55rem .85rem}
+.brand-mark{width:30px;height:30px;display:flex;align-items:center;justify-content:center;font-size:1.2rem}
+.brand-name{font-size:1.05rem;font-weight:700;letter-spacing:-.02em}
+.student-account{display:flex;align-items:center;gap:.55rem;margin:.15rem .35rem .7rem;padding:.55rem .55rem;border-radius:10px;background:rgba(255,255,255,.045)}
+.student-avatar{width:30px;height:30px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:#2f6feb;color:white;font-weight:700;font-size:.78rem}.student-name{font-size:.78rem;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:155px}.student-email{font-size:.62rem;opacity:.45;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:155px}
+.nav-label{font-size:.7rem;font-weight:650;opacity:.45;text-transform:uppercase;letter-spacing:.08em;padding:.35rem .65rem .25rem}
+.nav-section-title{font-size:.86rem;font-weight:650;padding:.85rem .65rem .35rem;color:rgba(255,255,255,.82)}
+.book-item{display:flex;align-items:center;gap:.55rem;padding:.45rem .25rem}
+.book-icon{width:29px;height:29px;border-radius:7px;background:rgba(255,255,255,.08);display:flex;align-items:center;justify-content:center}
+.book-info{min-width:0}.book-name{font-size:.77rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.book-meta{font-size:.64rem;opacity:.45;margin-top:.08rem}
+.connection{margin:.75rem .35rem .2rem;padding:.45rem .6rem;border-radius:8px;background:rgba(46,204,113,.10);color:#7ee2a8;font-size:.7rem;display:flex;align-items:center;gap:.45rem}
+.connection-off{background:rgba(243,156,18,.10);color:#f3c36b}
+.connection-dot{width:7px;height:7px;border-radius:50%;background:#36d77f;display:inline-block;box-shadow:0 0 0 3px rgba(54,215,127,.10)}
+.connection-off .connection-dot{background:#f0a52c}
+/* Main welcome */
+.welcome{text-align:center;margin:18vh auto 2rem;max-width:650px}.welcome h1{font-size:2.2rem;margin:0}.welcome h2{font-size:1.8rem;margin:.35rem 0}.welcome p{opacity:.6;font-size:1rem}
+.source-card{border:1px solid rgba(128,128,128,.18);border-radius:12px;padding:.75rem;margin:.35rem 0;background:rgba(128,128,128,.04)}
+.small-muted{opacity:.7;font-size:.88rem}
+[data-testid="stChatMessage"]{border:0;background:transparent;padding:.2rem 0;margin-bottom:.75rem}
+/* Fixed bottom composer */
+[data-testid="stChatInput"]{position:fixed!important;left:calc(50% - min(525px, 45vw))!important;right:auto!important;width:min(1050px, 90vw)!important;bottom:1rem!important;z-index:999!important;padding:0!important;background:transparent!important}
+[data-testid="stChatInput"]>div{border-radius:20px!important;border:1px solid rgba(255,255,255,.12)!important;background:#212121!important;box-shadow:0 8px 30px rgba(0,0,0,.35)!important}
+[data-testid="stChatInput"] textarea{min-height:50px!important;max-height:180px!important;padding:14px 58px 14px 16px!important;font-size:.96rem!important}
+[data-testid="stChatInput"] button{border-radius:12px!important}
+</style>
+""", unsafe_allow_html=True)
