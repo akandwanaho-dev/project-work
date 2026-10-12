@@ -120,7 +120,7 @@ def init_state():
         "quiz_history": [],
         "quiz_topic": "",
         "quiz_history_selected": None,
-        "active_view": "chat",
+        "active_view": "dashboard",
         "flashcards": [],
         "last_search_results": [],
         "supabase": None,
@@ -167,11 +167,17 @@ with st.sidebar:
 
     st.markdown('<div class="nav-label">Study</div>', unsafe_allow_html=True)
     nav_items = [
-        ("💬", "Chat", "chat"),
+        ("⌂", "Dashboard", "dashboard"),
+        ("▤", "My Library", "library"),
+        ("💬", "AI Chat", "chat"),
         ("🔎", "Search textbooks", "search"),
         ("🎴", "Flashcards", "flashcards"),
-        ("📊", "Progress", "progress"),
-        ("ℹ️", "Help & setup", "help"),
+        ("📝", "Quizzes", "quiz"),
+        ("✎", "Notes", "notes"),
+        ("▣", "Progress", "progress"),
+        ("👤", "Profile", "profile"),
+        ("⚙", "Settings", "settings"),
+        ("ℹ", "Help & Support", "help"),
     ]
     for icon, label, view in nav_items:
         active = st.session_state.active_view == view
@@ -322,7 +328,112 @@ if source_mode == "Textbook + web research" and not secret("TAVILY_API_KEY"):
 # ============================================================
 view = st.session_state.active_view
 
-if view == "chat":
+if view == "dashboard":
+    user = current_user()
+    profile_name = (st.session_state.get("profile") or {}).get("full_name") or (user.email.split("@")[0] if user and user.email else "Student")
+    st.markdown(f"""
+    <div class="topbar">
+      <div class="topbar-search">⌕ &nbsp; Search your content...</div>
+      <div class="topbar-user"><div class="topbar-avatar">{profile_name[:1].upper()}</div><div><b>{profile_name}</b><small>Student</small></div></div>
+    </div>
+    <div class="dashboard-heading"><h1>Welcome back, {profile_name}! 👋</h1><p>Here's what's happening with your study journey today.</p></div>
+    """, unsafe_allow_html=True)
+    stat1, stat2, stat3, stat4 = st.columns(4)
+    stats = [
+        (stat1, "▤", "Total Files", str(len(st.session_state.books)), "In your library", "purple"),
+        (stat2, "●", "AI Chats", str(len(st.session_state.chat_sessions)), "Study conversations", "blue"),
+        (stat3, "▥", "Questions Asked", str(st.session_state.progress["questions_asked"]), "Keep learning", "green"),
+        (stat4, "★", "Quizzes Taken", str(len(st.session_state.quiz_history)), "Practice makes progress", "orange"),
+    ]
+    for col, icon, label, value, hint, color in stats:
+        with col:
+            st.markdown(f'<div class="stat-card"><div class="stat-icon {color}">{icon}</div><div><div class="stat-label">{label}</div><div class="stat-value">{value}</div><div class="stat-hint">{hint}</div></div></div>', unsafe_allow_html=True)
+
+    left, right = st.columns([1, 1], gap="large")
+    with left:
+        with st.container(border=True):
+            st.markdown('<div class="panel-heading"><h3>Recent Files</h3><span>Your library</span></div>', unsafe_allow_html=True)
+            recent_books = list(st.session_state.books.items())[-5:][::-1]
+            if recent_books:
+                for name, meta in recent_books:
+                    st.markdown(f'<div class="recent-row"><div class="file-badge">PDF</div><div class="recent-copy"><b>{name}</b><small>{meta.get("subject") or "Textbook"} · {meta.get("pages",0)} pages</small></div></div>', unsafe_allow_html=True)
+            else:
+                st.markdown('<div class="empty-hint">Your textbooks will appear here after you upload them.</div>', unsafe_allow_html=True)
+            if st.button("Open My Library  →", key="dashboard_library", use_container_width=True):
+                set_view("library"); st.rerun()
+    with right:
+        with st.container(border=True):
+            st.markdown('<div class="panel-heading"><h3>Recent Chats</h3><span>Your study sessions</span></div>', unsafe_allow_html=True)
+            recent_chats = list(st.session_state.chat_sessions.items())[-5:][::-1]
+            if recent_chats:
+                for chat_name, msgs in recent_chats:
+                    last_user = next((m.get("content","") for m in reversed(msgs) if m.get("role") == "user"), "Start a new conversation")
+                    st.markdown(f'<div class="recent-row"><div class="chat-badge">▢</div><div class="recent-copy"><b>{chat_name}</b><small>{last_user[:72]}</small></div></div>', unsafe_allow_html=True)
+            else:
+                st.markdown('<div class="empty-hint">Ask your first question to start a study chat.</div>', unsafe_allow_html=True)
+            if st.button("Go to AI Chat  →", key="dashboard_chat", use_container_width=True):
+                set_view("chat"); st.rerun()
+
+    bottom_left, bottom_right = st.columns([1, 1], gap="large")
+    with bottom_left:
+        with st.container(border=True):
+            st.markdown('<div class="panel-heading"><h3>Quick Actions</h3></div>', unsafe_allow_html=True)
+            q1,q2,q3,q4,q5 = st.columns(5)
+            quick = [(q1,"☁","Upload Files","library"),(q2,"●","New Chat","chat"),(q3,"▤","Create Cards","flashcards"),(q4,"▣","Take Quiz","quiz"),(q5,"✎","New Note","notes")]
+            for col, ico, label, dest in quick:
+                with col:
+                    st.markdown(f'<div class="quick-icon">{ico}</div><div class="quick-label">{label}</div>', unsafe_allow_html=True)
+                    if st.button("Open", key=f"quick_{dest}", use_container_width=True):
+                        if dest == "chat": new_chat()
+                        else: set_view(dest)
+                        st.rerun()
+    with bottom_right:
+        st.markdown("""
+        <div class="study-banner">
+          <div><h2>Study Smarter with AI ✨</h2><p>Ask questions, get explanations, summarize content, and boost your learning with AI.</p></div>
+          <div class="banner-illustration">📚<br><span>✦ 🤖 ✦</span></div>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("Start a New Chat  →", key="banner_new_chat", type="primary", use_container_width=True):
+            new_chat(); st.rerun()
+
+elif view == "library":
+    st.title("📚 My Library")
+    st.caption("Upload, organize, and study from your textbooks using the controls in the sidebar.")
+    if not st.session_state.books:
+        st.info("Upload PDF, DOCX, TXT, or Markdown textbooks using **Add textbooks** in the sidebar.")
+    else:
+        for name, meta in st.session_state.books.items():
+            with st.container(border=True):
+                st.markdown(f"**📘 {name}**")
+                st.caption(f'{meta.get("pages",0)} pages · {meta.get("chunks",0)} passages')
+                a,b=st.columns(2)
+                if a.button("Study this book", key=f"library_study_{meta['hash']}", use_container_width=True):
+                    st.session_state.selected_books=[name]; set_view("chat"); st.rerun()
+                if b.button("Delete book", key=f"library_delete_{meta['hash']}", use_container_width=True):
+                    delete_book_from_db(meta); remove_book(name); st.rerun()
+
+elif view == "notes":
+    st.title("📝 Notes")
+    st.caption("Write and copy your personal revision notes.")
+    note = st.text_area("Your notes", key="personal_notes", height=300, placeholder="Write key facts, definitions, formulas, or exam reminders...")
+    st.download_button("Download notes (.txt)", note, file_name="izy_read_notes.txt", use_container_width=True)
+
+elif view == "profile":
+    st.title("👤 Student Profile")
+    p = st.session_state.get("profile") or {}
+    full_name = st.text_input("Full name", value=p.get("full_name",""), key="profile_page_name")
+    school = st.text_input("School", value=p.get("school",""), key="profile_page_school")
+    level = st.text_input("Class / level", value=p.get("class_level",""), key="profile_page_level")
+    if st.button("Save profile", type="primary"):
+        save_profile(full_name.strip(), school.strip(), level.strip()); st.success("Profile saved.")
+
+elif view == "settings":
+    st.title("⚙️ Settings")
+    st.caption("Tune how izy read explains and retrieves your textbook content.")
+    st.info("Use the **Settings** section in the sidebar to change your model, subject, study mode, answer length, and retrieval options.")
+
+elif view == "chat":
     # Clean ChatGPT-like conversation surface: no tabs, no study controls.
     if not st.session_state.messages:
         st.markdown('<div class="welcome"><h1>📚</h1><h2>How can I help you study?</h2><p>Ask questions about your textbooks, request explanations, solve problems, or prepare for exams.</p></div>', unsafe_allow_html=True)
@@ -590,5 +701,51 @@ st.markdown("""
 [data-testid="stChatInput"]>div{border-radius:20px!important;border:1px solid rgba(255,255,255,.12)!important;background:#212121!important;box-shadow:0 8px 30px rgba(0,0,0,.35)!important}
 [data-testid="stChatInput"] textarea{min-height:50px!important;max-height:180px!important;padding:14px 58px 14px 16px!important;font-size:.96rem!important}
 [data-testid="stChatInput"] button{border-radius:12px!important}
+</style>
+""", unsafe_allow_html=True)
+
+
+
+st.markdown("""
+<style>
+:root{--izy-purple:#6037d9;--izy-ink:#11152b;--izy-muted:#68708d;--izy-line:#ececf4}
+[data-testid="stAppViewContainer"],[data-testid="stHeader"]{background:#f8f9fd!important;color:var(--izy-ink)}
+[data-testid="stAppViewContainer"] .main .block-container{max-width:1600px;padding:0 1.35rem 2.5rem!important}
+[data-testid="stSidebar"]{background:linear-gradient(180deg,#17183d 0%,#20204d 100%)!important;border-right:0!important}
+[data-testid="stSidebar"]>div:first-child{padding:.8rem .8rem 1.2rem!important}
+[data-testid="stSidebar"] *{color:#f7f7ff}
+[data-testid="stSidebar"] .chatgpt-brand{padding:.55rem .55rem 1rem;border-bottom:1px solid rgba(255,255,255,.13);margin-bottom:.7rem}
+[data-testid="stSidebar"] .brand-mark{width:46px;height:46px;border-radius:14px;background:linear-gradient(135deg,#8d73ff,#4c35c5);font-size:1.6rem}
+[data-testid="stSidebar"] .brand-name{font-size:1.35rem;font-weight:800}
+[data-testid="stSidebar"] .student-account{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.08);padding:.65rem;border-radius:13px}
+[data-testid="stSidebar"] .student-avatar{background:#6e4ce8;width:35px;height:35px}
+[data-testid="stSidebar"] .stButton>button{border:0!important;border-radius:11px!important;background:transparent!important;min-height:2.55rem!important;color:#f7f7ff!important;font-weight:500!important}
+[data-testid="stSidebar"] .stButton>button:hover{background:rgba(255,255,255,.10)!important}
+[data-testid="stSidebar"] .stButton>button[kind="primary"]{background:linear-gradient(100deg,#5430bd,#382875)!important;color:white!important}
+[data-testid="stSidebar"] .stExpander{border:1px solid rgba(255,255,255,.12)!important;border-radius:12px!important;background:rgba(255,255,255,.04)!important}
+[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"]{background:rgba(255,255,255,.04)!important;border:1px dashed rgba(255,255,255,.22)!important}
+[data-testid="stSidebar"] [data-testid="stExpanderDetails"]{padding:.5rem!important}
+[data-testid="stSidebar"] hr{border-color:rgba(255,255,255,.13)!important}
+[data-testid="stSidebar"] .nav-label,[data-testid="stSidebar"] .nav-section-title{color:#d5d4f0!important}
+.topbar{display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:.85rem .4rem 1rem;border-bottom:1px solid #ececf4;margin-bottom:1.2rem}
+.topbar-search{border:1px solid #e5e6ef;background:white;border-radius:13px;padding:.7rem 1rem;color:#8a90a8;max-width:470px;width:55%;box-shadow:0 2px 10px rgba(25,28,60,.025)}
+.topbar-user{display:flex;align-items:center;gap:.7rem;font-size:.9rem}.topbar-user small{display:block;color:#7e849b;font-size:.72rem;margin-top:2px}
+.topbar-avatar{display:flex;align-items:center;justify-content:center;border-radius:50%;width:40px;height:40px;background:#e8e4ff;color:#5b3acb;font-weight:800}
+.dashboard-heading{margin:.3rem .1rem 1.45rem}.dashboard-heading h1{font-size:1.85rem;letter-spacing:-.04em;font-weight:800;color:#11152b;margin:0}.dashboard-heading p{color:#69718e;margin:.3rem 0 0}
+.stat-card{display:flex;align-items:center;gap:1rem;background:white;border:1px solid #eeeef5;border-radius:17px;padding:1.05rem;min-height:116px;box-shadow:0 5px 18px rgba(24,28,65,.035);margin-bottom:.9rem}
+.stat-icon{width:66px;height:66px;flex:0 0 66px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:1.9rem;font-weight:800}
+.stat-icon.purple{background:#f1edff;color:#6a42e6}.stat-icon.blue{background:#e9f4ff;color:#35a1f5}.stat-icon.green{background:#e9f9f0;color:#32bd7e}.stat-icon.orange{background:#fff4df;color:#f4a72e}
+.stat-label{font-size:.78rem;color:#626b89;margin-bottom:.3rem}.stat-value{font-size:1.65rem;line-height:1.15;font-weight:800;color:#11152b}.stat-hint{font-size:.72rem;color:#6b42dc;margin-top:.35rem}
+[data-testid="stVerticalBlockBorderWrapper"]{background:white!important;border:1px solid #eeeef5!important;border-radius:17px!important;box-shadow:0 5px 18px rgba(24,28,65,.03)}
+.panel-heading{display:flex;align-items:center;justify-content:space-between;margin-bottom:.65rem}.panel-heading h3{font-size:1rem;color:#14182e;margin:0;font-weight:800}.panel-heading span{font-size:.72rem;color:#8389a2}
+.recent-row{display:flex;align-items:center;gap:.75rem;padding:.8rem .15rem;border-bottom:1px solid #f0f0f6;min-width:0}.file-badge{display:flex;align-items:center;justify-content:center;width:32px;height:36px;border-radius:7px;background:#ffebef;color:#e94f69;font-size:.63rem;font-weight:800;flex-shrink:0}.chat-badge{display:flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:10px;background:#f0ebff;color:#6d43e8;font-size:1.2rem;flex-shrink:0}.recent-copy{min-width:0;flex:1}.recent-copy b{display:block;font-size:.82rem;color:#191d32;font-weight:650;overflow-wrap:anywhere}.recent-copy small{display:block;color:#777f9c;font-size:.72rem;margin-top:.22rem;overflow-wrap:anywhere}
+.empty-hint{color:#7a819a;font-size:.85rem;padding:1.5rem .2rem}
+[data-testid="stVerticalBlockBorderWrapper"] .stButton>button{border-radius:10px;border:1px solid #eeeef5;background:#fbfbfe;color:#5d35d7;font-weight:650}
+.quick-icon{height:66px;border-radius:13px;background:#f1edff;color:#6943df;display:flex;align-items:center;justify-content:center;font-size:1.7rem;margin-bottom:.45rem}.quick-label{text-align:center;font-size:.72rem;min-height:2.2rem;color:#1b1d31;font-weight:650}
+.study-banner{min-height:220px;display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:1.5rem;border-radius:18px;background:linear-gradient(115deg,#e8e5ff,#d9d0ff);border:1px solid #e4defe;color:#191943}
+.study-banner h2{font-size:1.35rem;font-weight:800;margin:0 0 .55rem}.study-banner p{font-size:.86rem;line-height:1.55;max-width:360px;color:#36365e}.banner-illustration{font-size:3rem;text-align:center;min-width:90px}.banner-illustration span{font-size:1.2rem;color:#8b71e8}
+.stButton>button{border-radius:11px}
+[data-testid="stChatInput"]{position:fixed!important;left:calc(50% - min(650px, 44vw))!important;width:min(1300px,88vw)!important;right:auto!important;bottom:1rem!important}
+@media(max-width:900px){[data-testid="stAppViewContainer"] .main .block-container{padding:0 .75rem 2rem!important}.dashboard-heading h1{font-size:1.45rem}.stat-card{padding:.75rem;gap:.6rem}.stat-icon{width:48px;height:48px;flex-basis:48px;font-size:1.35rem}.stat-value{font-size:1.3rem}.study-banner{padding:1rem}.banner-illustration{display:none}}
 </style>
 """, unsafe_allow_html=True)
