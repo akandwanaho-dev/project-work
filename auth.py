@@ -13,13 +13,24 @@ def secret(name, default=""):
 
 
 def supabase_client():
-    url = secret("SUPABASE_URL")
-    key = secret("SUPABASE_ANON_KEY") or secret("SUPABASE_PUBLISHABLE_KEY")
+    # Normalize values pasted into Streamlit Secrets.
+    url = str(secret("SUPABASE_URL") or "").strip().strip("\\'\\\"").strip()
+    key = str(secret("SUPABASE_ANON_KEY") or secret("SUPABASE_PUBLISHABLE_KEY") or "").strip().strip("\\'\\\"").strip()
     if not url or not key:
         return None
+
+    # The setting should be the project URL. Also tolerate a mistakenly
+    # pasted Auth/REST endpoint by removing that known suffix.
+    url = url.rstrip("/")
+    for suffix in ("/auth/v1", "/rest/v1"):
+        if url.lower().endswith(suffix):
+            url = url[:-len(suffix)].rstrip("/")
+            break
+
     try:
         return create_client(url, key)
-    except Exception:
+    except Exception as e:
+        st.session_state["supabase_init_error"] = str(e)
         return None
 
 
@@ -150,8 +161,12 @@ def auth_screen():
     sb=st.session_state.get("supabase")
     st.markdown('<div style="max-width:520px;margin:8vh auto 0;text-align:center"><div style="font-size:3rem">📚</div><h1 style="margin:.25rem 0">izy read</h1><p style="opacity:.65">Your personal textbook study workspace</p></div>',unsafe_allow_html=True)
     if sb is None:
-        st.error("Supabase is not connected. Add SUPABASE_URL and SUPABASE_ANON_KEY to Streamlit Secrets.")
-        st.code('SUPABASE_URL = "https://your-project.supabase.co"\nSUPABASE_ANON_KEY = "your-client-safe-key"',language="toml"); st.stop()
+        st.error("Supabase is not connected. Check SUPABASE_URL and SUPABASE_ANON_KEY in Streamlit Secrets.")
+        init_error = st.session_state.get("supabase_init_error")
+        if init_error:
+            st.caption(f"Supabase client setup detail: {init_error}")
+        st.code('SUPABASE_URL = "https://your-project.supabase.co"\nSUPABASE_ANON_KEY = "your-client-safe-key"', language="toml")
+        st.stop()
     login_tab,signup_tab=st.tabs(["Log in","Create account"])
     with login_tab:
         with st.form("login_form"):
