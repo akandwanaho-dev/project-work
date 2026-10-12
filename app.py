@@ -182,54 +182,93 @@ def save_progress_to_db(subject, topic, questions, correct):
 
 
 def auth_screen():
-    sb=st.session_state.get("supabase")
-    st.markdown('<div class="eyebrow">LEARN WITH CONFIDENCE</div><h1 style="font-size:2.6rem;margin-bottom:.2rem">Your next big idea starts here.</h1><p style="color:#68708d;margin-bottom:1.3rem">A calmer, smarter space to read, practise and grow.</p>', unsafe_allow_html=True)
-    # Uses the image files already present in the GitHub repository.
-    slides = [("learnwithai.jpg", "Learn with AI", "Get clear explanations, whenever you need them."), ("students.jpg", "Make progress together", "Build confidence one topic at a time."), ("study.jpg", "Make every study session count", "Turn your textbooks into a personal learning plan."), ("determined.jpg", "Stay determined", "Small steps today lead to big results.")]
-    if "auth_slide" not in st.session_state: st.session_state.auth_slide = 0
+    sb = st.session_state.get("supabase")
+    slides = [
+        ("learnwithai.jpg", "Learn with AI", "Get clear explanations, whenever you need them."),
+        ("students.jpg", "Make progress with confidence", "Build stronger study habits, one topic at a time."),
+        ("study.jpg", "Make every session count", "Turn your textbooks into a personal learning plan."),
+        ("determined.jpg", "Stay curious. Stay determined.", "Small steps today lead to big results."),
+    ]
+    # Auto-advance every 6 seconds; CSS animation softens each image transition.
+    if "auth_slide" not in st.session_state:
+        st.session_state.auth_slide = 0
+    try:
+        from streamlit_autorefresh import st_autorefresh
+        tick = st_autorefresh(interval=6000, limit=None, key="auth_slide_timer")
+        if tick:
+            st.session_state.auth_slide = tick % len(slides)
+    except Exception:
+        pass
     slide = slides[st.session_state.auth_slide % len(slides)]
-    image_col, caption_col = st.columns([1.2, 1])
+    st.markdown('<div class="eyebrow">WELCOME TO IZY READ</div><h1 class="auth-heading">Your next big idea starts here.</h1><p class="auth-subtitle">Read smarter, practise with purpose, and make progress every day.</p>', unsafe_allow_html=True)
+    image_col, form_col = st.columns([1.05, 0.95], gap="large")
     with image_col:
-        if Path(slide[0]).exists(): st.image(slide[0], use_container_width=True)
-        elif Path("logo.jpg").exists(): st.image("logo.jpg", use_container_width=True)
-        else: st.markdown('<div class="empty-card">📚</div>', unsafe_allow_html=True)
-    with caption_col:
-        st.markdown(f'<div style="padding:1.2rem .2rem"><h2>{slide[1]}</h2><p>{slide[2]}</p></div>', unsafe_allow_html=True)
-        p1, p2, p3 = st.columns([1,1,2])
-        if p1.button("←", key="auth_prev", use_container_width=True): st.session_state.auth_slide = (st.session_state.auth_slide - 1) % len(slides); st.rerun()
-        if p2.button("→", key="auth_next", use_container_width=True): st.session_state.auth_slide = (st.session_state.auth_slide + 1) % len(slides); st.rerun()
-        p3.caption(f"{st.session_state.auth_slide + 1} / {len(slides)} · A little inspiration before you begin")
-    if sb is None:
-        st.error("Supabase is not connected. Add SUPABASE_URL and SUPABASE_ANON_KEY to Streamlit Secrets.")
-        st.code('SUPABASE_URL = "https://your-project.supabase.co"\nSUPABASE_ANON_KEY = "your-client-safe-key"',language="toml"); st.stop()
-    login_tab,signup_tab=st.tabs(["Log in","Create account"])
-    with login_tab:
-        with st.form("login_form"):
-            email=st.text_input("Email",placeholder="student@example.com"); password=st.text_input("Password",type="password")
-            submitted=st.form_submit_button("Log in",type="primary",use_container_width=True)
-        if submitted:
-            if not email or not password: st.error("Enter your email and password.")
+        with st.container(border=True):
+            if Path(slide[0]).exists():
+                st.image(slide[0], use_container_width=True)
+            elif Path("logo.jpg").exists():
+                st.image("logo.jpg", use_container_width=True)
             else:
-                try:
-                    result=sb.auth.sign_in_with_password({"email":email.strip(),"password":password})
-                    if result.user:
-                        st.session_state.current_user=result.user; st.session_state.supabase=sb; load_user_data(sb,result.user.id); st.rerun()
-                except Exception as e: st.error(f"Login failed: {e}")
-    with signup_tab:
-        with st.form("signup_form"):
-            full_name=st.text_input("Full name",placeholder="Your name"); email=st.text_input("Email",placeholder="student@example.com",key="signup_email"); password=st.text_input("Password",type="password",key="signup_password"); confirm=st.text_input("Confirm password",type="password")
-            submitted=st.form_submit_button("Create account",type="primary",use_container_width=True)
-        if submitted:
-            if not full_name.strip() or not email.strip() or not password: st.error("Complete all fields.")
-            elif password!=confirm: st.error("Passwords do not match.")
-            elif len(password)<6: st.error("Use a password with at least 6 characters.")
-            else:
-                try:
-                    result=sb.auth.sign_up({"email":email.strip(),"password":password,"options":{"data":{"full_name":full_name.strip()}}})
-                    if result.user and result.session:
-                        st.session_state.current_user=result.user; st.session_state.supabase=sb; load_user_data(sb,result.user.id); st.success("Account created."); st.rerun()
-                    else: st.success("Account created. Check your email to confirm your account, then log in.")
-                except Exception as e: st.error(f"Sign-up failed: {e}")
+                st.markdown('<div class="empty-card">📚</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="auth-slide-caption"><div class="eyebrow">YOUR STUDY COMPANION</div><h2>{slide[1]}</h2><p>{slide[2]}</p></div>', unsafe_allow_html=True)
+            dots = st.columns([1, 1, 1, 1, 4])
+            for idx in range(4):
+                if dots[idx].button("●" if idx == st.session_state.auth_slide else "○", key=f"auth_dot_{idx}"):
+                    st.session_state.auth_slide = idx
+                    st.rerun()
+    with form_col:
+        with st.container(border=True):
+            st.markdown('<div class="eyebrow">YOUR LEARNING SPACE</div><h2>Welcome back</h2><p class="muted">Sign in or create an account to continue.</p>', unsafe_allow_html=True)
+            if sb is None:
+                st.error("Supabase is not connected. Add SUPABASE_URL and SUPABASE_ANON_KEY to Streamlit Secrets.")
+                st.code('SUPABASE_URL = "https://your-project.supabase.co"\\nSUPABASE_ANON_KEY = "your-client-safe-key"', language="toml")
+                st.stop()
+            login_tab, signup_tab = st.tabs(["Log in", "Create account"])
+            with login_tab:
+                with st.form("login_form"):
+                    email = st.text_input("Email", placeholder="student@example.com")
+                    password = st.text_input("Password", type="password", placeholder="Enter your password")
+                    submitted = st.form_submit_button("Log in", type="primary", use_container_width=True)
+                if submitted:
+                    if not email or not password:
+                        st.error("Enter your email and password.")
+                    else:
+                        try:
+                            result = sb.auth.sign_in_with_password({"email": email.strip(), "password": password})
+                            if result.user:
+                                st.session_state.current_user = result.user
+                                st.session_state.supabase = sb
+                                load_user_data(sb, result.user.id)
+                                st.rerun()
+                        except Exception as e:
+                            st.error(f"Login failed: {e}")
+            with signup_tab:
+                with st.form("signup_form"):
+                    full_name = st.text_input("Full name", placeholder="Your name")
+                    email = st.text_input("Email", placeholder="student@example.com", key="signup_email")
+                    password = st.text_input("Password", type="password", placeholder="At least 6 characters", key="signup_password")
+                    confirm = st.text_input("Confirm password", type="password", placeholder="Repeat your password")
+                    submitted = st.form_submit_button("Create account", type="primary", use_container_width=True)
+                if submitted:
+                    if not full_name.strip() or not email.strip() or not password:
+                        st.error("Complete all fields.")
+                    elif password != confirm:
+                        st.error("Passwords do not match.")
+                    elif len(password) < 6:
+                        st.error("Use a password with at least 6 characters.")
+                    else:
+                        try:
+                            result = sb.auth.sign_up({"email": email.strip(), "password": password, "options": {"data": {"full_name": full_name.strip()}}})
+                            if result.user and result.session:
+                                st.session_state.current_user = result.user
+                                st.session_state.supabase = sb
+                                load_user_data(sb, result.user.id)
+                                st.success("Account created.")
+                                st.rerun()
+                            else:
+                                st.success("Account created. Check your email to confirm your account, then log in.")
+                        except Exception as e:
+                            st.error(f"Sign-up failed: {e}")
 
 
 def require_auth():
@@ -544,34 +583,45 @@ def new_chat():
 st.set_page_config(page_title="Izy Read — AI Study Assistant", page_icon="📚", layout="wide")
 st.markdown(r"""
 <style>
-:root{--ink:#171b35;--muted:#68708d;--purple:#6541d9;--purple2:#8062ee;--line:#ececf5;--canvas:#f8f9fd;--lav:#f0edff}
+:root{--ink:#202938;--muted:#64748b;--purple:#4f46e5;--purple2:#6366f1;--line:#e2e8f0;--canvas:#f8fafc;--surface:#ffffff;--lav:#eef2ff;transition:background-color .35s ease,color .35s ease}
 html,body,[data-testid="stAppViewContainer"]{background:var(--canvas);color:var(--ink)}
 .block-container{max-width:1450px;padding-top:1.4rem;padding-bottom:3rem}
 h1,h2,h3{color:var(--ink);letter-spacing:-.035em}
 p,.muted,.stCaption{color:var(--muted)}
-[data-testid="stSidebar"]{background:#191b43;border-right:0}
+[data-testid="stSidebar"]{background:#182235;border-right:1px solid rgba(148,163,184,.18)}
 [data-testid="stSidebar"] *{color:#f6f5ff}
 [data-testid="stSidebar"]>div:first-child{padding:1.25rem .95rem}
 [data-testid="stSidebar"] .stButton>button{border:0;border-radius:12px;background:transparent;color:#eeedff;text-align:left;min-height:2.8rem;padding:.65rem .85rem;font-weight:550;box-shadow:none}
 [data-testid="stSidebar"] .stButton>button:hover{background:rgba(255,255,255,.10)}
-[data-testid="stSidebar"] .stButton>button[kind="primary"]{background:linear-gradient(110deg,#6440d8,#4430a5);color:white}
+[data-testid="stSidebar"] .stButton>button[kind="primary"]{background:linear-gradient(110deg,#4f46e5,#4338ca);color:white}
 [data-testid="stSidebar"] [data-testid="stImage"]{margin-bottom:.3rem}
 .brand-title{font-size:1.45rem;font-weight:800;color:#fff;letter-spacing:-.04em}.brand-subtitle{font-size:.83rem;color:#bdbce5;margin-top:.1rem}.side-rule{height:1px;background:rgba(255,255,255,.13);margin:1rem 0}
 .sidebar-bottom{height:35vh;min-height:60px}
-[data-testid="stMetric"],div[data-testid="stVerticalBlockBorderWrapper"]{background:white;border:1px solid var(--line);border-radius:18px;box-shadow:0 5px 18px rgba(36,34,88,.035)}
+[data-testid="stMetric"],div[data-testid="stVerticalBlockBorderWrapper"]{background:var(--surface);border:1px solid var(--line);border-radius:18px;box-shadow:0 5px 18px rgba(36,34,88,.035)}
 [data-testid="stMetric"]{padding:1rem 1.15rem}
 [data-testid="stMetricLabel"]{color:var(--muted)}[data-testid="stMetricValue"]{color:var(--ink);font-weight:750}
 .stButton>button,[data-testid="stFormSubmitButton"]>button{border-radius:11px;min-height:2.6rem;font-weight:600;border-color:#e5e3f1}
-.stButton>button[kind="primary"],[data-testid="stFormSubmitButton"]>button[kind="primary"]{background:linear-gradient(110deg,#6841de,#4b2db6);border:0;color:#fff}
-.stTextInput input,.stTextArea textarea,.stSelectbox div[data-baseweb="select"]>div,.stNumberInput input{border-radius:10px!important;border-color:#e5e6f0!important;background:white!important}
-[data-testid="stChatMessage"]{background:#fff;border:1px solid var(--line);border-radius:16px;padding:.5rem .8rem}
-[data-testid="stChatInput"]{background:white;border-radius:14px}
+.stButton>button[kind="primary"],[data-testid="stFormSubmitButton"]>button[kind="primary"]{background:linear-gradient(110deg,#4f46e5,#4338ca);border:0;color:#fff}
+.stTextInput input,.stTextArea textarea,.stSelectbox div[data-baseweb="select"]>div,.stNumberInput input{border-radius:10px!important;border-color:var(--line)!important;background:var(--surface)!important}
+[data-testid="stChatMessage"]{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:.5rem .8rem}
+[data-testid="stChatInput"]{background:var(--surface);border-radius:14px}
 .eyebrow{text-transform:uppercase;letter-spacing:.14em;font-size:.72rem;font-weight:800;color:#7758df;margin-bottom:.35rem}
 .hero{padding:1.8rem 2rem;border-radius:24px;background:linear-gradient(115deg,#e7e3ff,#f3edff 55%,#e7f5ff);border:1px solid #e8e1ff;margin-bottom:1.2rem}
 .hero h1{margin:0;color:#191b43;font-size:2.1rem}.hero p{font-size:1rem;margin:.45rem 0 0;color:#565d80}
 .empty-card{padding:2.5rem 1rem;text-align:center;background:white;border:1px dashed #d9d6ed;border-radius:18px;color:var(--muted)}
-[data-testid="stFileUploaderDropzone"]{border:1px dashed #c9c3e9!important;border-radius:14px;background:#fbfaff}
+[data-testid="stFileUploaderDropzone"]{border:1px dashed #c9c3e9!important;border-radius:14px;background:var(--surface)}
+.auth-heading{font-size:clamp(2rem,3vw,2.8rem);letter-spacing:-.04em;margin-bottom:.25rem}
+.auth-subtitle{color:var(--muted);margin-bottom:1.2rem}
+.auth-slide-caption{padding:.5rem .35rem .2rem;animation:fadeSlide .7s ease both}
+[data-testid="stImage"] img{animation:fadeSlide .7s ease both;border-radius:14px}
+@keyframes fadeSlide{from{opacity:.25;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
+.stTextInput input,.stTextArea textarea{min-height:2.8rem!important;padding:.65rem .85rem!important;transition:border-color .2s,box-shadow .2s!important}
+.stTextInput input:focus,.stTextArea textarea:focus{box-shadow:0 0 0 3px rgba(79,70,229,.14)!important;border-color:#6366f1!important}
+[data-testid="stChatInput"]{border:1px solid var(--line);box-shadow:0 8px 28px rgba(15,23,42,.07);transition:box-shadow .2s,border-color .2s}
+[data-testid="stChatInput"]:focus-within{border-color:#6366f1;box-shadow:0 0 0 3px rgba(79,70,229,.12)}
 @media(max-width:800px){.block-container{padding-left:1rem;padding-right:1rem}.hero{padding:1.2rem}.hero h1{font-size:1.6rem}}
+body:has(button[kind="secondary"]){ }
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -627,6 +677,13 @@ with st.sidebar:
             st.session_state.active_view = target
             st.rerun()
     st.markdown('<div class="sidebar-bottom"></div>', unsafe_allow_html=True)
+    if "ui_theme" not in st.session_state:
+        st.session_state.ui_theme = "light"
+    if st.button("☾  " + ("Switch to light mode" if st.session_state.ui_theme == "dark" else "Switch to dark mode"), key="theme_toggle", use_container_width=True):
+        st.session_state.ui_theme = "light" if st.session_state.ui_theme == "dark" else "dark"
+        st.rerun()
+    if st.session_state.ui_theme == "dark":
+        st.markdown("""<style>:root{--ink:#e5eaf3;--muted:#a5b1c2;--line:#303b4d;--canvas:#0b1220;--surface:#121c2d;--lav:#1c2540} html,body,[data-testid="stAppViewContainer"]{background:var(--canvas)!important;color:var(--ink)!important} h1,h2,h3,p,.stMarkdown,.stCaption{color:var(--ink)} [data-testid="stMetric"],div[data-testid="stVerticalBlockBorderWrapper"],[data-testid="stChatMessage"],[data-testid="stChatInput"]{background:var(--surface)!important;color:var(--ink)!important;border-color:var(--line)!important} .stTextInput input,.stTextArea textarea,.stSelectbox div[data-baseweb="select"]>div,.stNumberInput input{background:var(--surface)!important;color:var(--ink)!important;border-color:var(--line)!important} .hero{background:linear-gradient(115deg,#202044,#17283c)!important;border-color:#303b4d!important}.hero h1,.hero p{color:#e5eaf3!important} .empty-card{background:var(--surface)!important;border-color:var(--line)!important} [data-testid="stFileUploaderDropzone"]{background:var(--surface)!important;border-color:var(--line)!important}</style>""", unsafe_allow_html=True)
     st.caption(f"Signed in as **{profile_name}**")
     if st.button("Log out", key="logout_button", use_container_width=True):
         try:
@@ -767,7 +824,8 @@ if view == "chat":
             except Exception as e:
                 st.error(f"Voice transcription failed: {e}")
 
-    prompt = st.chat_input("Ask anything about your textbooks...", accept_file=True, file_type=["png", "jpg", "jpeg"], disabled=not token_ready)
+    token_ready = bool(secret("GROQ_API_KEY"))
+    prompt = st.chat_input("Ask a question about your textbooks…", accept_file=True, file_type=["png", "jpg", "jpeg"], disabled=not token_ready)
     if prompt:
         if isinstance(prompt, str):
             query, attached = prompt, []
