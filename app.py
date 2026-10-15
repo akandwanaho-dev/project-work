@@ -158,9 +158,6 @@ def init_state():
         if k not in st.session_state:
             st.session_state[k] = v
 
-init_state()
-require_auth()
-
 # ============================================================
 # HELPERS
 # ============================================================
@@ -851,6 +848,9 @@ def new_chat():
     st.session_state.messages = st.session_state.chat_sessions[name]
     st.session_state.active_view = "chat"
 
+
+init_state()
+require_auth()
 
 # ============================================================
 # SIDEBAR
