@@ -3,6 +3,7 @@ import os
 import re
 import json
 import hashlib
+import base64
 from collections import defaultdict
 from datetime import datetime
 
@@ -206,12 +207,61 @@ def load_user_data(sb, user_id):
         books = sb.table("books").select("*").eq("user_id", user_id).order("created_at", desc=True).execute().data or []
         for b in books:
             name = b.get("file_name") or b.get("title") or "Untitled book"
-            st.session_state.books[name] = {"name": name, "hash": b.get("id", sha(name.encode())), "pages": b.get("page_count") or 0, "chunks": 0, "size_mb": 0, "subject": b.get("subject") or "", "db_id": b.get("id"), "persisted_only": True}
-    except Exception:
-        pass
+            st.session_state.books[name] = {
+                "name": name,
+                "hash": b.get("file_hash") or sha(name.encode()),
+                "pages": b.get("page_count") or 0,
+                "chunks": 0,
+                "size_mb": 0,
+                "subject": b.get("subject") or "",
+                "db_id": b.get("id"),
+                "file_path": b.get("file_path") or "",
+                "persisted_only": True,
+            }
+        # Restore textbook bytes from Supabase Storage and rebuild the in-memory index.
+        restored_docs = []
+        for name, meta in list(st.session_state.books.items()):
+            file_path = meta.get("file_path")
+            if not file_path:
+                continue
+            try:
+                raw = sb.storage.from_(secret("SUPABASE_BOOKS_BUCKET", "textbooks")).download(file_path)
+                class StoredUpload:
+                    def __init__(self, filename, content):
+                        self.name = filename
+                        self._content = content
+                    def getvalue(self):
+                        return self._content
+                upload = StoredUpload(name, raw)
+                data, safe_filename, raw_docs = raw_docs_from_upload(upload)
+                splitter = RecursiveCharacterTextSplitter(chunk_size=1100, chunk_overlap=180, separators=["\n\n", "\n", ". ", " ", ""])
+                chunks = splitter.split_documents(raw_docs)
+                file_hash = meta.get("hash") or sha(data)
+                for i, doc in enumerate(chunks):
+                    doc.metadata["hash"] = file_hash
+                    doc.metadata["chunk_id"] = f"{file_hash[:12]}-{i}"
+                restored_docs.extend(chunks)
+                meta.update({"hash": sha(data), "chunks": len(chunks), "pages": len({d.metadata.get("page") for d in raw_docs}), "size_mb": round(len(data)/(1024*1024), 2), "persisted_only": False})
+            except Exception as restore_error:
+                # Keep the metadata visible, but tell the student the book is not searchable.
+                meta["persisted_only"] = True
+                meta["restore_error"] = str(restore_error)
+        st.session_state.documents = restored_docs
+        rebuild_index()
+    except Exception as e:
+        st.warning(f"Could not load saved textbooks: {e}")
+    quizzes = []
     try:
         quizzes = sb.table("quizzes").select("*").eq("user_id", user_id).order("created_at", desc=True).execute().data or []
-        st.session_state.quiz_history = [{"id": q["id"], "topic": q.get("topic") or q.get("title") or "Untitled quiz", "score": q.get("score",0), "questions": [], "answers": [], "submitted": q.get("completed",False), "date": (q.get("created_at") or "")[:16].replace("T"," ")} for q in quizzes]
+        st.session_state.quiz_history = [{
+            "id": q["id"],
+            "topic": q.get("topic") or q.get("title") or "Untitled quiz",
+            "score": q.get("score", 0),
+            "questions": q.get("questions_json") or [],
+            "answers": q.get("answers_json") or [],
+            "submitted": q.get("completed", False),
+            "date": (q.get("created_at") or "")[:16].replace("T", " "),
+        } for q in quizzes]
     except Exception:
         pass
     try:
@@ -222,8 +272,20 @@ def load_user_data(sb, user_id):
     try:
         rows = sb.table("progress").select("*").eq("user_id", user_id).execute().data or []
         st.session_state.progress["topics"] = defaultdict(int)
+        for msgs in st.session_state.chat_sessions.values():
+            for message in msgs:
+                if message.get("role") == "user":
+                    topic_key = f"General: {str(message.get('content', ''))[:60]}"
+                    st.session_state.progress["topics"][topic_key] += 1
         for row in rows:
-            st.session_state.progress["topics"][f'{row.get("subject","General")}: {row.get("topic","Unknown")}'] = row.get("questions_answered",0)
+            count = int(row.get("questions_answered", 0) or 0)
+            st.session_state.progress["topics"][f'{row.get("subject","General")}: {row.get("topic","Unknown")}'] = count
+        # The progress table may include both quiz and study activity; derive quiz accuracy from quiz records.
+        st.session_state.progress["quizzes_taken"] = len(st.session_state.get("quiz_history", []))
+        st.session_state.progress["quiz_correct"] = sum(round(float(q.get("score", 0) or 0) * int(q.get("total_questions", 0) or 0) / 100) for q in quizzes)
+        st.session_state.progress["quiz_total"] = sum(int(q.get("total_questions", 0) or 0) for q in quizzes)
+        # Recover the total number of questions from loaded chat messages.
+        st.session_state.progress["questions_asked"] = sum(1 for msgs in st.session_state.chat_sessions.values() for m in msgs if m.get("role") == "user")
     except Exception:
         pass
 
@@ -246,38 +308,72 @@ def save_chat_to_db(chat_name, messages):
     try:
         existing=sb.table("chats").select("id").eq("user_id",user.id).eq("title",chat_name).limit(1).execute().data or []
         if existing:
-            chat_id=existing[0]["id"]; sb.table("chats").update({"updated_at":datetime.now().isoformat()}).eq("id",chat_id).execute(); sb.table("messages").delete().eq("chat_id",chat_id).execute()
+            chat_id = existing[0]["id"]
+            sb.table("chats").update({"updated_at": datetime.now().isoformat()}).eq("id", chat_id).execute()
+            saved = sb.table("messages").select("role,content").eq("chat_id", chat_id).order("created_at").execute().data or []
+            saved_pairs = [(m.get("role"), m.get("content")) for m in saved]
         else:
-            chat_id=sb.table("chats").insert({"user_id":user.id,"title":chat_name}).execute().data[0]["id"]
-        payload=[{"chat_id":chat_id,"user_id":user.id,"role":m["role"],"content":m["content"]} for m in messages if m.get("role") in ("user","assistant") and m.get("content")]
-        if payload: sb.table("messages").insert(payload).execute()
-    except Exception: pass
+            result = sb.table("chats").insert({"user_id": user.id, "title": chat_name}).execute()
+            if not result.data:
+                raise RuntimeError("Supabase did not return the new chat ID.")
+            chat_id = result.data[0]["id"]
+            saved_pairs = []
+        payload = []
+        current_pairs = [(m.get("role"), m.get("content")) for m in messages if m.get("role") in ("user", "assistant") and m.get("content")]
+        if current_pairs[:len(saved_pairs)] == saved_pairs:
+            new_pairs = current_pairs[len(saved_pairs):]
+        else:
+            # Recover gracefully if rows are not a strict prefix (e.g. older schema ordering).
+            new_pairs = current_pairs[len(saved_pairs):] if len(current_pairs) >= len(saved_pairs) else []
+        for role, content in new_pairs:
+            payload.append({"chat_id": chat_id, "user_id": user.id, "role": role, "content": content})
+        if payload:
+            sb.table("messages").insert(payload).execute()
+    except Exception as e:
+        st.warning(f"Chat could not be saved: {e}")
 
 
 def save_book_to_db(name, meta):
     sb=st.session_state.get("supabase"); user=current_user()
     if not sb or not user: return
     try:
-        result=sb.table("books").insert({"user_id":user.id,"title":name,"file_name":name,"file_path":"","subject":meta.get("subject",""),"page_count":int(meta.get("pages",0) or 0),"indexed":True}).execute()
-        if result.data: meta["db_id"]=result.data[0]["id"]
-    except Exception: pass
+        payload = {"user_id": user.id, "title": name, "file_name": name, "file_path": meta.get("file_path", ""), "file_hash": meta.get("hash", ""), "subject": meta.get("subject", ""), "page_count": int(meta.get("pages", 0) or 0), "indexed": True}
+        if meta.get("db_id"):
+            result = sb.table("books").update(payload).eq("id", meta["db_id"]).eq("user_id", user.id).execute()
+            if result.data:
+                meta["db_id"] = result.data[0]["id"]
+        else:
+            result = sb.table("books").insert(payload).execute()
+            if result.data:
+                meta["db_id"] = result.data[0]["id"]
+    except Exception as e:
+        st.warning(f"Textbook metadata could not be saved. Apply the included Supabase migration and check table permissions. Details: {e}")
 
 
 def delete_book_from_db(meta):
     sb=st.session_state.get("supabase"); user=current_user()
     if not sb or not user: return
     try:
-        if meta.get("db_id"): sb.table("books").delete().eq("id",meta["db_id"]).eq("user_id",user.id).execute()
-    except Exception: pass
+        if meta.get("db_id"):
+            sb.table("books").delete().eq("id", meta["db_id"]).eq("user_id", user.id).execute()
+        if meta.get("file_path"):
+            bucket = secret("SUPABASE_BOOKS_BUCKET", "textbooks")
+            sb.storage.from_(bucket).remove([meta["file_path"]])
+    except Exception as e:
+        st.warning(f"Could not fully delete the saved textbook: {e}")
 
 
-def save_quiz_to_db(topic, score, total):
+def save_quiz_to_db(topic, score, total, questions=None, answers=None):
     sb=st.session_state.get("supabase"); user=current_user()
     if not sb or not user: return None
     try:
-        row=sb.table("quizzes").insert({"user_id":user.id,"title":topic or "Untitled quiz","topic":topic or "General","score":int(score),"total_questions":int(total),"completed":True}).execute().data
+        payload = {"user_id": user.id, "title": topic or "Untitled quiz", "topic": topic or "General", "score": int(score), "total_questions": int(total), "completed": True, "questions_json": questions or [], "answers_json": answers or []}
+        row = sb.table("quizzes").insert(payload).execute().data
         return row[0]["id"] if row else None
-    except Exception: return None
+    except Exception as e:
+        # A migration adds JSON columns; explain this rather than silently losing quiz details.
+        st.warning(f"Quiz score was calculated, but saving its full questions failed. Apply the SQL migration included in the project. Details: {e}")
+        return None
 
 
 def save_flashcards_to_db(cards, topic):
@@ -324,10 +420,19 @@ def auth_screen():
             ("students.jpg", "https://images.unsplash.com/photo-1529390079861-591de354faf5?auto=format&fit=crop&w=500&q=80"),
             ("study.jpg", "https://images.unsplash.com/photo-1516979187457-637abb4f9353?auto=format&fit=crop&w=500&q=80"),
         ]
-        image_cols = st.columns(4, gap="small")
-        for col, (filename, fallback_url) in zip(image_cols, image_candidates):
-            if Path(filename).exists(): col.image(filename, use_container_width=True)
-            else: col.image(fallback_url, use_container_width=True)
+        # Auto-moving image strip. Local images in the project take priority over remote fallbacks.
+        import html
+        import mimetypes
+        slide_items = []
+        for filename, fallback_url in image_candidates:
+            if Path(filename).exists():
+                mime = mimetypes.guess_type(filename)[0] or "image/jpeg"
+                encoded = base64.b64encode(Path(filename).read_bytes()).decode("ascii")
+                image_url = f"data:{mime};base64,{encoded}"
+            else:
+                image_url = fallback_url
+            slide_items.append(f'<div class="login-slide" style="background-image:url(&quot;{html.escape(image_url, quote=True)}&quot;)"></div>')
+        st.markdown('<div class="login-slideshow"><div class="login-slides-track">' + ''.join(slide_items + slide_items) + '</div></div><style>.login-slideshow{overflow:hidden;margin-top:10px;border-radius:12px}.login-slides-track{display:flex;gap:8px;width:max-content;animation:loginScroll 28s linear infinite}.login-slide{flex:0 0 150px;height:92px;border-radius:10px;background-size:cover;background-position:center;opacity:.95}@keyframes loginScroll{from{transform:translateX(0)}to{transform:translateX(calc(-50% - 4px))}}.login-slideshow:hover .login-slides-track{animation-play-state:paused}@media(prefers-reduced-motion:reduce){.login-slides-track{animation:none}}</style>', unsafe_allow_html=True)
     with right:
         st.markdown('<div style="text-align:center;margin-bottom:1.1rem"><h2 style="margin-bottom:.2rem">Welcome to izy read</h2><p style="opacity:.65">Sign in to continue your learning</p></div>',unsafe_allow_html=True)
         if sb is None:
@@ -466,13 +571,30 @@ def rebuild_index():
         st.session_state.vectorstore = FAISS.from_documents(st.session_state.documents, embeddings_model())
 
 
+def persist_book_file(name, data, file_hash):
+    """Upload textbook bytes to the user's private Supabase Storage folder."""
+    sb = st.session_state.get("supabase")
+    user = current_user()
+    if not sb or not user:
+        return ""
+    bucket = secret("SUPABASE_BOOKS_BUCKET", "textbooks")
+    path = f"{user.id}/{file_hash}/{safe_name(name)}"
+    try:
+        sb.storage.from_(bucket).upload(path, data, {"content-type": "application/octet-stream", "upsert": "true"})
+        return path
+    except Exception as e:
+        st.warning(f"Textbook indexed for this session, but file backup failed. Create the private '{bucket}' Storage bucket and apply the included storage policies to keep it available after login. Details: {e}")
+        return ""
+
+
 def index_uploads(files):
-    existing = {m["hash"] for m in st.session_state.books.values()}
+    existing = {m.get("hash"): m for m in st.session_state.books.values() if m.get("hash")}
     added = 0
     for upload in files or []:
         data, name, raw_docs = raw_docs_from_upload(upload)
         h = sha(data)
-        if h in existing:
+        prior_meta = st.session_state.books.get(name) or existing.get(h)
+        if h in existing and not existing[h].get("persisted_only"):
             continue
         splitter = RecursiveCharacterTextSplitter(chunk_size=1100, chunk_overlap=180, separators=["\n\n", "\n", ". ", " ", ""])
         chunks = splitter.split_documents(raw_docs)
@@ -480,16 +602,20 @@ def index_uploads(files):
             d.metadata["hash"] = h
             d.metadata["chunk_id"] = f"{h[:12]}-{i}"
         st.session_state.documents.extend(chunks)
+        storage_path = persist_book_file(name, data, h)
         st.session_state.books[name] = {
             "name": name,
             "hash": h,
+            "db_id": (prior_meta or {}).get("db_id"),
+            "file_path": storage_path,
             "size_mb": round(len(data)/(1024*1024), 2),
             "chunks": len(chunks),
             "pages": len({d.metadata.get("page") for d in raw_docs}),
             "chapters": sorted({d.metadata.get("chapter", "Unknown chapter") for d in chunks}),
             "uploaded": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "persisted_only": not bool(storage_path),
         }
-        existing.add(h)
+        existing[h] = st.session_state.books[name]
         added += 1
     if added:
         rebuild_index()
@@ -506,7 +632,7 @@ def gemini_api_key():
     return secret("GEMINI_API_KEY")
 
 
-def ask_model(messages, model, temperature=.35, max_tokens=900):
+def ask_model(messages, model, temperature=.35, max_tokens=900, image_parts=None):
     """Generate a response with the Gemini API, preserving chat history."""
     api_key = gemini_api_key()
     if not api_key:
@@ -532,6 +658,12 @@ def ask_model(messages, model, temperature=.35, max_tokens=900):
 
     if not contents:
         raise RuntimeError("There is no user message to send to Gemini.")
+    if image_parts:
+        # Attach image data to the latest user turn for Gemini multimodal understanding.
+        for item in reversed(contents):
+            if item.get("role") == "user":
+                item.setdefault("parts", []).extend(image_parts)
+                break
 
     payload = {
         "contents": contents,
@@ -544,6 +676,10 @@ def ask_model(messages, model, temperature=.35, max_tokens=900):
         payload["systemInstruction"] = {"parts": [{"text": "\n\n".join(system_parts)}]}
 
     model_name = (model or DEFAULT_LLM_MODEL).strip()
+    if model_name.startswith("models/"):
+        model_name = model_name.removeprefix("models/")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", model_name):
+        raise ValueError("Invalid Gemini model name. Use a model ID such as gemini-2.5-flash.")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
     try:
         response = requests.post(
@@ -573,84 +709,63 @@ def ask_model(messages, model, temperature=.35, max_tokens=900):
 
 
 def retrieve(query, selected_books, selected_chapters, k=6):
-    """Retrieve from the selected material first, with a keyword fallback.
-
-    Searching only the top 24 global results and filtering afterwards can
-    accidentally remove every result from a selected book. Search a wider
-    candidate set, then use lexical matching over the selected chunks if the
-    vector results are empty or unhelpful.
-    """
+    """Hybrid retrieval: semantic similarity plus lexical overlap, scoped to selected books."""
+    query = clean(query)
     all_docs = list(st.session_state.get("documents", []))
-    if not all_docs:
+    if not query or not all_docs:
         return []
 
-    def allowed(d):
-        if selected_books and d.metadata.get("source") not in selected_books:
+    def allowed(doc):
+        if selected_books and doc.metadata.get("source") not in selected_books:
             return False
-        if selected_chapters and d.metadata.get("chapter") not in selected_chapters:
+        if selected_chapters and doc.metadata.get("chapter") not in selected_chapters:
             return False
-        return bool((d.page_content or "").strip())
+        return bool(clean(doc.page_content))
 
-    pool = [d for d in all_docs if allowed(d)]
+    pool = [doc for doc in all_docs if allowed(doc)]
     if not pool:
         return []
 
-    out, seen = [], set()
+    stopwords = {"what", "which", "when", "where", "who", "why", "how", "are", "is", "was", "were", "the", "a", "an", "of", "in", "on", "to", "for", "and", "or", "with", "does", "do", "explain", "define", "describe", "give", "me", "about", "types", "type", "please", "tell"}
+    terms = list(dict.fromkeys(t for t in re.findall(r"[a-zA-Z][a-zA-Z0-9'-]*", query.lower()) if len(t) > 2 and t not in stopwords))
+    semantic_rank = {}
     if st.session_state.vectorstore is not None:
         try:
-            # Avoid losing selected-book matches because they ranked below a
-            # small global top-k before the book/chapter filters were applied.
-            candidates = st.session_state.vectorstore.similarity_search(
-                query, k=min(len(all_docs), max(60, k * 10))
-            )
-            for d in candidates:
-                if not allowed(d):
-                    continue
-                key = d.metadata.get("chunk_id") or (
-                    d.metadata.get("source"), d.metadata.get("page"), d.page_content[:100]
-                )
-                if key not in seen:
-                    seen.add(key)
-                    out.append(d)
-                if len(out) >= k:
-                    break
-        except Exception:
-            # The keyword fallback below still provides useful excerpts if
-            # the vector index is temporarily unavailable.
-            out = []
+            candidates = st.session_state.vectorstore.similarity_search(query, k=min(len(all_docs), max(30, k * 8)))
+            for rank, doc in enumerate(candidates):
+                key = doc.metadata.get("chunk_id") or (doc.metadata.get("source"), doc.metadata.get("page"), doc.page_content[:100])
+                semantic_rank[key] = rank
+        except Exception as e:
+            # Continue with lexical ranking if the vector store is unavailable.
+            st.session_state.last_retrieval_warning = str(e)
 
-    # Keyword fallback: score the selected chunks against meaningful query
-    # terms. This also helps with short questions and imperfect embeddings.
-    if len(out) < min(2, k):
-        stopwords = {
-            "what", "which", "when", "where", "who", "why", "how", "are",
-            "is", "was", "were", "the", "a", "an", "of", "in", "on", "to",
-            "for", "and", "or", "with", "does", "do", "explain", "define",
-            "describe", "give", "me", "about", "types", "type",
-        }
-        terms = [
-            t for t in re.findall(r"[a-zA-Z][a-zA-Z0-9'-]*", query.lower())
-            if len(t) > 2 and t not in stopwords
-        ]
-        scored = []
-        for d in pool:
-            text = (d.page_content or "").lower()
-            score = sum(text.count(term) * (2 if re.search(r"\b" + re.escape(term) + r"\b", text) else 1)
-                        for term in terms)
-            if score > 0:
-                scored.append((score, d))
-        scored.sort(key=lambda item: item[0], reverse=True)
-        for _, d in scored:
-            key = d.metadata.get("chunk_id") or (
-                d.metadata.get("source"), d.metadata.get("page"), d.page_content[:100]
-            )
-            if key not in seen:
-                seen.add(key)
-                out.append(d)
-            if len(out) >= k:
-                break
+    scored = []
+    for doc in pool:
+        key = doc.metadata.get("chunk_id") or (doc.metadata.get("source"), doc.metadata.get("page"), doc.page_content[:100])
+        text = (doc.page_content or "").lower()
+        lexical = 0.0
+        for term in terms:
+            count = len(re.findall(r"\b" + re.escape(term) + r"\b", text))
+            if count:
+                lexical += min(count, 5) * (2.5 if len(term) >= 6 else 1.5)
+        sem_rank = semantic_rank.get(key)
+        semantic = (1.0 / (1 + sem_rank)) if sem_rank is not None else 0.0
+        # Lexical relevance is weighted enough to distinguish specific topics, while semantics handles paraphrases.
+        score = lexical + semantic * 3.0
+        if score > 0:
+            scored.append((score, lexical, doc))
 
-    return out[:k]
+    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    results, seen = [], set()
+    for _, _, doc in scored:
+        key = doc.metadata.get("chunk_id") or (doc.metadata.get("source"), doc.metadata.get("page"), doc.page_content[:100])
+        if key in seen:
+            continue
+        seen.add(key)
+        results.append(doc)
+        if len(results) >= k:
+            break
+    return results
 
 
 def excerpt_fallback(query, docs):
@@ -694,9 +809,13 @@ def source_cards(docs):
     return out[:8]
 
 
-def answer_question(query, docs, mode, subject, answer_length, source_mode, history, model, temperature, web_results=None):
-    if not docs and source_mode == "Textbook only":
-        return excerpt_fallback(query, docs)
+def answer_question(query, docs, mode, subject, answer_length, source_mode, history, model, temperature, web_results=None, image_parts=None):
+    if not docs and source_mode == "Textbook only" and not image_parts:
+        selected = ", ".join(st.session_state.get("selected_books", [])) or "no textbook selected"
+        return (f"I couldn't find searchable textbook passages for **{query}**. "
+                f"Current selection: {selected}. Open **Books** and check that the textbook was indexed successfully. "
+                "If this book was uploaded before the latest session, upload it again after configuring the private Supabase Storage bucket so its text can be restored after login. "
+                "I have not invented an answer because your knowledge mode is set to *Textbook only*.")
 
     ctx = context_text(docs) if docs else "(No textbook passages retrieved.)"
     length_rule = {"Short": "Be concise.", "Medium": "Give moderate detail.", "Detailed": "Give a thorough structured answer."}[answer_length]
@@ -705,6 +824,9 @@ def answer_question(query, docs, mode, subject, answer_length, source_mode, hist
         grounding = 'Use ONLY textbook context. If insufficient, say: "I could not find enough information in the selected textbook material."'
     else:
         grounding = "Use textbook context first. You may add general knowledge, but clearly label unsupported additions as General knowledge."
+
+    if image_parts:
+        grounding += " The user also attached an image; inspect it to understand the question, diagram, or exercise, and use textbook passages where relevant."
 
     web_block = ""
     if web_results:
@@ -720,6 +842,12 @@ Study mode: {mode}. {STUDY_MODES[mode]}
 {length_rule}
 {grounding}
 
+IMPORTANT RESPONSE RULES:
+- Answer the CURRENT QUESTION directly. Do not reuse or paraphrase an earlier assistant answer unless the current question asks for it.
+- Identify the key concept in the current question before drafting the answer.
+- If the supplied textbook passages are irrelevant, say that the selected material does not contain enough relevant evidence; do not pretend unrelated passages answer the question.
+- Give a different, question-specific response for each distinct question.
+
 Citation rules:
 - For textbook claims cite only supplied context with [Source: filename, p. X].
 - For DOCX/TXT/MD, p. means section number.
@@ -732,12 +860,13 @@ TEXTBOOK CONTEXT:
 """.strip()
 
     messages = [{"role": "system", "content": system}]
-    for m in history[-8:]:
-        if m.get("role") in {"user", "assistant"}:
+    # Keep only recent text turns. Source cards and other UI metadata never enter model history.
+    for m in history[-6:]:
+        if m.get("role") in {"user", "assistant"} and isinstance(m.get("content"), str):
             messages.append({"role": m["role"], "content": m["content"]})
     messages.append({"role": "user", "content": query})
     max_tokens = {"Short": 500, "Medium": 850, "Detailed": 1300}[answer_length]
-    return ask_model(messages, model, temperature, max_tokens)
+    return ask_model(messages, model, temperature, max_tokens, image_parts=image_parts)
 
 
 def json_array_from_model(prompt, model, max_tokens=1600):
@@ -779,7 +908,7 @@ CONTEXT:\n{context_text(docs) if docs else '(none)'}
     return [x for x in data if isinstance(x, dict) and x.get("front") and x.get("back")][:count]
 
 
-def transcribe(audio_bytes):
+def transcribe(audio_bytes, mime_type="audio/wav", model=None):
     """Transcribe short audio using Gemini multimodal input."""
     api_key = gemini_api_key()
     if not api_key:
@@ -789,12 +918,15 @@ def transcribe(audio_bytes):
     payload = {
         "contents": [{"role": "user", "parts": [
             {"text": "Transcribe the spoken words in this audio accurately. Return only the transcription."},
-            {"inlineData": {"mimeType": "audio/wav", "data": audio_b64}},
+            {"inlineData": {"mimeType": mime_type or "audio/wav", "data": audio_b64}},
         ]}],
         "generationConfig": {"temperature": 0, "maxOutputTokens": 1200},
     }
+    model_name = (model or st.session_state.get("gemini_model_setting") or secret("GEMINI_MODEL", DEFAULT_LLM_MODEL) or DEFAULT_LLM_MODEL).strip()
+    if model_name.startswith("models/"):
+        model_name = model_name.removeprefix("models/")
     response = requests.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{DEFAULT_LLM_MODEL}:generateContent",
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent",
         headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
         json=payload,
         timeout=90,
@@ -901,6 +1033,14 @@ with st.sidebar:
         st.session_state.messages = []
         st.session_state.chat_sessions = {"New chat": []}
         st.session_state.active_chat = "New chat"
+        st.session_state.quiz = []
+        st.session_state.quiz_answers = []
+        st.session_state.quiz_submitted = False
+        st.session_state.quiz_history = []
+        st.session_state.flashcards = []
+        st.session_state.progress = {"questions_asked": 0, "quizzes_taken": 0, "quiz_correct": 0, "quiz_total": 0, "topics": defaultdict(int)}
+        st.session_state.selected_books = []
+        st.session_state.selected_chapters = []
         st.rerun()
 
     token_ready = bool(secret("GEMINI_API_KEY"))
@@ -949,6 +1089,8 @@ with st.sidebar:
             for name, meta in list(st.session_state.books.items()):
                 st.markdown(f"**{name}**  ")
                 st.caption(f"{meta['pages']} pages · {meta['chunks']} passages")
+                if meta.get("persisted_only"):
+                    st.warning("File is saved as metadata only or could not be restored. Re-upload it to search it.")
                 c1, c2 = st.columns(2)
                 if c1.button("Open", key=f"open_book_{meta['hash']}", use_container_width=True):
                     st.session_state.selected_books = [name]
@@ -971,7 +1113,7 @@ with st.sidebar:
             st.success("Profile saved.")
         st.divider()
         with st.expander("Learning preferences"):
-            model = st.text_input("Gemini chat model", value=secret("GEMINI_MODEL", DEFAULT_LLM_MODEL) or DEFAULT_LLM_MODEL, key="hf_model_setting")
+            model = st.text_input("Gemini model", value=secret("GEMINI_MODEL", DEFAULT_LLM_MODEL) or DEFAULT_LLM_MODEL, key="gemini_model_setting")
             temperature = st.slider("Creativity", 0.0, 1.0, .35, .05, key="temperature_setting")
             answer_length = st.selectbox("Answer length", ["Short", "Medium", "Detailed"], index=1, key="answer_length_setting")
             teaching_level = st.selectbox("Student level", ["Beginner", "Secondary School", "Advanced"], index=1, key="teaching_level_setting")
@@ -1016,7 +1158,7 @@ with st.sidebar:
         st.caption("Add GEMINI_API_KEY in Streamlit Secrets")
 
 # Safe defaults are available even when the Profile section is not open.
-model = st.session_state.get("hf_model_setting", secret("GEMINI_MODEL", DEFAULT_LLM_MODEL) or DEFAULT_LLM_MODEL)
+model = st.session_state.get("gemini_model_setting", st.session_state.get("hf_model_setting", secret("GEMINI_MODEL", DEFAULT_LLM_MODEL) or DEFAULT_LLM_MODEL))
 temperature = st.session_state.get("temperature_setting", 0.35)
 answer_length = st.session_state.get("answer_length_setting", "Medium")
 teaching_level = st.session_state.get("teaching_level_setting", "Secondary School")
@@ -1119,7 +1261,7 @@ elif view == "chat":
         with st.chat_message(m["role"]):
             st.markdown(m["content"])
             if m.get("sources"):
-                with st.expander(" Sources"):
+                with st.expander("Sources"):
                     for s in m["sources"]:
                         st.markdown(f"<div class='source-card'><b>{s['source']}</b> — page/section {s['page']}<br><span class='small-muted'>{s['chapter']}</span><br><br>{s['excerpt']}</div>", unsafe_allow_html=True)
             if m.get("web_sources"):
@@ -1132,19 +1274,29 @@ elif view == "chat":
         if audio and st.button("Transcribe recording", key="transcribe_voice"):
             try:
                 with st.spinner("Transcribing..."):
-                    st.session_state.voice_transcript = transcribe(audio.getvalue())
+                    st.session_state.voice_transcript = transcribe(audio.getvalue(), getattr(audio, "type", "audio/wav"), model)
                 st.success(st.session_state.voice_transcript)
             except Exception as e:
                 st.error(f"Voice transcription failed: {e}")
 
-    prompt = st.chat_input("Ask anything about your textbooks...", accept_file=True, file_type=["png", "jpg", "jpeg"], disabled=not token_ready)
+    prompt = st.chat_input("Ask anything about your textbooks...", accept_file=True, file_type=["png", "jpg", "jpeg", "webp"], disabled=not token_ready)
     if prompt:
         if isinstance(prompt, str):
             query, attached = prompt, []
         else:
             query, attached = prompt.text or "", list(prompt.files or [])
-        if attached:
-            st.warning("Image attachment received, but this text-only Llama backend cannot inspect images yet.")
+        image_parts = []
+        for image_file in attached:
+            try:
+                mime_type = getattr(image_file, "type", "image/jpeg") or "image/jpeg"
+                if mime_type not in {"image/png", "image/jpeg", "image/webp"}:
+                    st.warning(f"Skipped unsupported image type: {mime_type}")
+                    continue
+                image_parts.append({"inlineData": {"mimeType": mime_type, "data": base64.b64encode(image_file.getvalue()).decode("ascii")}})
+            except Exception as image_error:
+                st.warning(f"Could not read an attached image: {image_error}")
+        if not query.strip() and image_parts:
+            query = "Please inspect this image and explain the relevant educational content."
         if query.strip():
             query = query.strip()
             st.session_state.messages.append({"role": "user", "content": query})
@@ -1163,13 +1315,10 @@ elif view == "chat":
                         elif source_mode == "Textbook + web research":
                             effective = "Textbook + general knowledge"
                         try:
-                            response = answer_question(query, docs, study_mode, subject, answer_length, effective, st.session_state.messages[:-1], model, temperature, web_results)
+                            response = answer_question(query, docs, study_mode, subject, answer_length, effective, st.session_state.messages[:-1], model, temperature, web_results, image_parts=image_parts)
                         except Exception as model_error:
-                            response = excerpt_fallback(query, docs)
-                            if docs:
-                                st.warning(f"The AI service could not generate an explanation ({model_error}). Showing retrieved textbook passages instead.")
-                            else:
-                                st.warning(f"The AI service could not generate an explanation ({model_error}).")
+                            # Do not silently substitute the same fallback text for every failed model call.
+                            raise RuntimeError(f"Gemini could not generate this answer: {model_error}") from model_error
                     st.markdown(response)
                     sources = source_cards(docs)
                     if sources:
@@ -1184,9 +1333,10 @@ elif view == "chat":
                     st.session_state.chat_sessions[st.session_state.active_chat] = st.session_state.messages
                     save_chat_to_db(st.session_state.active_chat, st.session_state.messages)
                     st.session_state.progress["questions_asked"] += 1
-                    st.session_state.progress["topics"][query[:60]] += 1
+                    st.session_state.progress["topics"][f"{subject}: {query[:60]}"] += 1
                 except Exception as e:
                     st.error(f"Response error: {e}")
+                    st.info("Your question has not been given a fabricated answer. Check the Gemini API key/model and retry. If this is a textbook-only question, also confirm that a relevant book is indexed.")
 
 elif view == "search":
     st.title(" Search textbooks")
@@ -1213,6 +1363,9 @@ elif view == "quiz":
     if st.button("Generate new quiz", type="primary", disabled=not topic.strip()):
         try:
             docs = retrieve(topic, selected_books, selected_chapters, min(10, retrieval_k + 2))
+            if not docs and source_mode == "Textbook only":
+                st.warning("No relevant textbook passages were found for this topic. Re-index a textbook or change Knowledge mode in Profile → Learning preferences.")
+                st.stop()
             with st.spinner("Generating quiz..."):
                 st.session_state.quiz = make_quiz(topic, docs, qcount, difficulty, model)
             st.session_state.quiz_topic = topic
@@ -1223,6 +1376,9 @@ elif view == "quiz":
         except Exception as e:
             st.error(f"Could not generate quiz: {e}")
 
+    if st.session_state.quiz_history_selected and not st.session_state.quiz:
+        st.info("This saved quiz contains a score only. Quizzes completed before full quiz persistence was enabled cannot be reopened; generate a new quiz to continue studying.")
+
     if st.session_state.quiz:
         with st.form("quiz_form"):
             answers = []
@@ -1231,7 +1387,7 @@ elif view == "quiz":
                 answers.append(st.radio("Choose", q["options"], key=f"qa_{i}", index=None, label_visibility="collapsed"))
                 st.divider()
             submitted = st.form_submit_button("Submit answers", use_container_width=True)
-        if submitted:
+        if submitted and not st.session_state.quiz_submitted:
             st.session_state.quiz_answers = answers
             st.session_state.quiz_submitted = True
             correct = sum(a == q["options"][q["answer_index"]] for a, q in zip(answers, st.session_state.quiz))
@@ -1241,7 +1397,7 @@ elif view == "quiz":
             st.session_state.progress["quiz_correct"] += correct
             st.session_state.progress["quiz_total"] += total
             save_progress_to_db(subject, st.session_state.quiz_topic or "Quiz", total, correct)
-            db_quiz_id = save_quiz_to_db(st.session_state.quiz_topic or "Untitled quiz", score, total)
+            db_quiz_id = save_quiz_to_db(st.session_state.quiz_topic or "Untitled quiz", score, total, st.session_state.quiz, answers)
             quiz_id = datetime.now().strftime("%Y%m%d%H%M%S%f")
             st.session_state.quiz_history.append({
                 "id": db_quiz_id or quiz_id,
@@ -1277,9 +1433,13 @@ elif view == "flashcards":
     if st.button("Generate flashcards", type="primary", disabled=not ftopic.strip()):
         try:
             docs = retrieve(ftopic, selected_books, selected_chapters, min(10, retrieval_k + 2))
+            if not docs and source_mode == "Textbook only":
+                st.warning("No relevant textbook passages were found for this topic. Re-index a textbook or change Knowledge mode in Profile → Learning preferences.")
+                st.stop()
             with st.spinner("Creating flashcards..."):
-                st.session_state.flashcards = make_flashcards(ftopic, docs, fcount, model)
-                save_flashcards_to_db(st.session_state.flashcards, ftopic)
+                new_cards = make_flashcards(ftopic, docs, fcount, model)
+                st.session_state.flashcards = new_cards + st.session_state.flashcards
+                save_flashcards_to_db(new_cards, ftopic)
             st.rerun()
         except Exception as e:
             st.error(f"Could not create flashcards: {e}")
@@ -1311,14 +1471,14 @@ elif view == "progress":
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 elif view == "help":
-    st.title("ℹ Help & setup")
+    st.title("Help & setup")
     st.markdown("""
 ### Getting started
 1. Open ** Books** in the sidebar and add your PDF, DOCX, TXT or Markdown textbooks.
 2. Ask questions from the main chat. Answers are grounded in the indexed textbook passages.
 3. Open ** Quizzes** to create a new quiz or reopen previous quizzes.
 4. Use ** Search textbooks**, ** Flashcards**, and ** Progress** from the sidebar.
-5. Use ** Settings** for subject, study mode, answer length and model options.
+5. Open **Profile → Learning preferences** for subject, study mode, answer length and model options.
 
 ### Streamlit Secrets
 ```toml
@@ -1329,7 +1489,9 @@ TAVILY_API_KEY = "tvly_your_key_here"
 
 **Important:** never hard-code API keys in `app.py` or commit them to GitHub.
 
-**Limitations:** scanned/image-only PDFs need OCR, Gemini is used for chat and voice transcription, student accounts and core metadata are persisted in Supabase; textbook file contents/indexes still need Supabase Storage for full cross-device RAG persistence.
+**Persistence setup:** run the included `supabase_migration.sql` and create the private `textbooks` Storage bucket. Existing books uploaded before Storage was configured must be uploaded again once to back up their file bytes.
+
+**Limitations:** scanned/image-only PDFs need OCR. Textbook-only mode will not invent an answer when no relevant textbook passage is available.
 """)
 
 # ============================================================
@@ -1338,37 +1500,25 @@ TAVILY_API_KEY = "tvly_your_key_here"
 # CSS is injected late as well so it reliably wins over Streamlit defaults.
 st.markdown("""
 <style>
-/* Overall ChatGPT-like dark workspace with subtle study-themed backgrounds */
-.stApp{
-  background-color:#f8fafc;
-  background-image:
-    linear-gradient(rgba(248,250,252,.94),rgba(248,250,252,.97)),
-    url("https://images.unsplash.com/photo-1455390582262-044c596d4f4e?auto=format&fit=crop&w=2200&q=85");
-  background-size:cover;
-  background-position:center;
-  background-attachment:fixed;
-}
-.block-container{max-width:1180px;padding-top:1.6rem;padding-bottom:7.5rem;padding-left:clamp(1rem,3vw,3rem);padding-right:clamp(1rem,3vw,3rem)}
-section[data-testid="stSidebar"]{width:clamp(260px,24vw,340px)!important;min-width:clamp(260px,24vw,340px)!important}
-@media(min-width:1100px){.block-container{max-width:1180px}}
-[data-testid="stSidebar"]{
-  border-right:1px solid #e2e8f0;
-  background:#f1f5f9;
-  background-size:cover;background-position:center;
-}
+/* Theme-aware, responsive workspace; use Streamlit's active theme variables. */
+.stApp{background-color:var(--background-color);background-image:none}
+.block-container{max-width:1450px;padding-top:1.4rem;padding-bottom:7.5rem;padding-left:clamp(1rem,2.5vw,2.5rem);padding-right:clamp(1rem,2.5vw,2.5rem)}
+section[data-testid="stSidebar"]{width:clamp(250px,22vw,320px)!important;min-width:clamp(250px,22vw,320px)!important}
+[data-testid="stSidebar"]{border-right:1px solid var(--border-color, rgba(128,128,128,.22));background:var(--secondary-background-color);background-size:cover;background-position:center}
 [data-testid="stSidebar"]>div:first-child{padding:.7rem .55rem 1rem}
 [data-testid="stSidebar"] .block-container{padding:0}
 [data-testid="stSidebar"] hr{margin:.65rem .35rem;border-color:rgba(255,255,255,.08)}
-[data-testid="stSidebar"] .stButton>button{width:100%;border:0;border-radius:9px;background:transparent;text-align:left;min-height:2.35rem;padding:.48rem .65rem;font-weight:450;color:#334155;box-shadow:none}
-[data-testid="stSidebar"] .stButton>button:hover{background:#e2e8f0}
-[data-testid="stSidebar"] .stButton>button[kind="primary"]{background:#dbeafe}
-[data-testid="stSidebar"] .stButton>button[kind="primary"]:hover{background:rgba(255,255,255,.13)}
+[data-testid="stSidebar"] .stButton>button{width:100%;border:1px solid transparent;border-radius:9px;background:transparent;text-align:left;min-height:2.35rem;padding:.48rem .65rem;font-weight:500;color:var(--text-color);box-shadow:none}
+[data-testid="stSidebar"] .stButton>button:hover{background:rgba(100,116,139,.12);border-color:rgba(100,116,139,.18)}
+[data-testid="stSidebar"] .stButton>button[kind="primary"]{background:rgba(59,130,246,.14);border-color:rgba(59,130,246,.18);color:var(--text-color)}
+[data-testid="stSidebar"] .stButton>button[kind="primary"]:hover{background:rgba(59,130,246,.2)}
 [data-testid="stSidebar"] .stExpander{border:0;background:transparent}
 [data-testid="stSidebar"] [data-testid="stExpanderDetails"]{padding:.35rem .25rem .55rem}
 [data-testid="stSidebar"] [data-testid="stExpanderToggleIcon"]{opacity:.7}
 [data-testid="stSidebar"] .stFileUploader{border-radius:9px}
-[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"]{padding:.55rem;background:rgba(255,255,255,.035);border:1px dashed rgba(255,255,255,.15);border-radius:9px}
+[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"]{padding:.55rem;background:rgba(128,128,128,.04);border:1px dashed rgba(128,128,128,.3);border-radius:9px}
 [data-testid="stSidebar"] .stCaption{font-size:.72rem}
+.student-account{background:rgba(128,128,128,.07)}
 .chatgpt-brand{display:flex;align-items:center;gap:.55rem;padding:.45rem .55rem .85rem}
 .brand-mark{width:30px;height:30px;display:flex;align-items:center;justify-content:center;font-size:1.2rem}
 .brand-name{font-size:1.05rem;font-weight:700;letter-spacing:-.02em}
@@ -1384,14 +1534,15 @@ section[data-testid="stSidebar"]{width:clamp(260px,24vw,340px)!important;min-wid
 .connection-dot{width:7px;height:7px;border-radius:50%;background:#36d77f;display:inline-block;box-shadow:0 0 0 3px rgba(54,215,127,.10)}
 .connection-off .connection-dot{background:#f0a52c}
 /* Main welcome */
-.welcome{text-align:center;margin:18vh auto 2rem;max-width:650px;padding:2.1rem 1.5rem;border:1px solid rgba(255,255,255,.10);border-radius:26px;background:linear-gradient(135deg,rgba(255,255,255,.92),rgba(241,245,249,.88)),url("https://images.unsplash.com/photo-1516321318423-f06f85e504b3?auto=format&fit=crop&w=1400&q=80");background-size:cover;background-position:center;box-shadow:0 18px 55px rgba(0,0,0,.18)}.welcome h1{font-size:2.2rem;margin:0}.welcome h2{font-size:1.8rem;margin:.35rem 0}.welcome p{opacity:.72;font-size:1rem}
+.welcome{text-align:center;margin:12vh auto 2rem;max-width:720px;padding:2.1rem 1.5rem;border:1px solid rgba(128,128,128,.18);border-radius:24px;background:linear-gradient(135deg,var(--secondary-background-color),var(--background-color));box-shadow:0 12px 35px rgba(0,0,0,.06)}.welcome h1{font-size:2.2rem;margin:0}.welcome h2{font-size:1.8rem;margin:.35rem 0}.welcome p{opacity:.72;font-size:1rem}
 .source-card{border:1px solid rgba(128,128,128,.18);border-radius:12px;padding:.75rem;margin:.35rem 0;background:rgba(128,128,128,.04)}
 .small-muted{opacity:.7;font-size:.88rem}
 [data-testid="stChatMessage"]{border:0;background:transparent;padding:.2rem 0;margin-bottom:.75rem}
-/* Fixed bottom composer */
-[data-testid="stChatInput"]{position:fixed!important;left:calc(50% - min(525px, 45vw))!important;right:auto!important;width:min(1050px, 90vw)!important;bottom:1rem!important;z-index:999!important;padding:0!important;background:transparent!important}
-[data-testid="stChatInput"]>div{border-radius:20px!important;border:1px solid #cbd5e1!important;background:#ffffff!important;box-shadow:0 8px 30px rgba(0,0,0,.35)!important}
-[data-testid="stChatInput"] textarea{min-height:50px!important;max-height:180px!important;padding:14px 58px 14px 16px!important;font-size:.96rem!important}
+/* Fixed composer stays inside the main pane and respects the active theme. */
+[data-testid="stChatInput"]{position:fixed!important;left:clamp(270px, calc(22vw + 1rem), 340px)!important;right:1.25rem!important;width:auto!important;bottom:1rem!important;z-index:999!important;padding:0!important;background:transparent!important}
+[data-testid="stChatInput"]>div{border-radius:20px!important;border:1px solid rgba(128,128,128,.32)!important;background:var(--secondary-background-color)!important;box-shadow:0 8px 24px rgba(0,0,0,.12)!important}
+[data-testid="stChatInput"] textarea{min-height:50px!important;max-height:180px!important;padding:14px 58px 14px 16px!important;font-size:.96rem!important;color:var(--text-color)!important}
+@media(max-width:760px){[data-testid="stChatInput"]{left:1rem!important;right:1rem!important;bottom:.5rem!important}.block-container{padding-bottom:8rem!important}section[data-testid="stSidebar"]{width:auto!important;min-width:0!important}}
 [data-testid="stChatInput"] button{border-radius:12px!important}
 </style>
 """, unsafe_allow_html=True)
