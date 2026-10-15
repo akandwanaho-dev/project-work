@@ -140,7 +140,7 @@ def init_state():
         "quiz_history": [],
         "quiz_topic": "",
         "quiz_history_selected": None,
-        "active_view": "chat",
+        "active_view": "home",
         "flashcards": [],
         "last_search_results": [],
         "supabase": None,
@@ -881,103 +881,126 @@ require_auth()
 # SIDEBAR
 # ============================================================
 with st.sidebar:
-    user=current_user()
-    profile_name=(st.session_state.get("profile") or {}).get("full_name") or (user.email.split("@")[0] if user and user.email else "Student")
+    user = current_user()
+    profile_name = (st.session_state.get("profile") or {}).get("full_name") or (user.email.split("@")[0] if user and user.email else "Student")
     st.markdown("""
-    <div class="chatgpt-brand">
-        <div class="brand-mark"></div>
-        <div class="brand-name">izy read</div>
-    </div>
+    <div class="chatgpt-brand"><div class="brand-mark"></div><div class="brand-name">izy read</div></div>
     """, unsafe_allow_html=True)
     st.markdown(f'<div class="student-account"><div class="student-avatar">{profile_name[:1].upper()}</div><div><div class="student-name">{profile_name}</div><div class="student-email">{user.email if user else ""}</div></div></div>', unsafe_allow_html=True)
-    if st.button("  Log out", key="logout_button", use_container_width=True):
-        try: st.session_state.supabase.auth.sign_out()
-        except Exception: pass
-        for key in ["current_user","profile","supabase"]: st.session_state.pop(key,None)
-        st.session_state.books={}; st.session_state.documents=[]; st.session_state.vectorstore=None; st.session_state.messages=[]; st.session_state.chat_sessions={"New Chat":[]}; st.session_state.active_chat="New Chat"
+
+    if st.button("Log out", key="logout_button", use_container_width=True):
+        try:
+            st.session_state.supabase.auth.sign_out()
+        except Exception:
+            pass
+        for key in ["current_user", "profile", "supabase"]:
+            st.session_state.pop(key, None)
+        st.session_state.books = {}
+        st.session_state.documents = []
+        st.session_state.vectorstore = None
+        st.session_state.messages = []
+        st.session_state.chat_sessions = {"New chat": []}
+        st.session_state.active_chat = "New chat"
         st.rerun()
 
     token_ready = bool(secret("GEMINI_API_KEY"))
-
-    if st.button("  New chat", key="sidebar_new_chat", use_container_width=True):
-        new_chat()
-        st.rerun()
-
-    st.markdown('<div class="nav-label">Study</div>', unsafe_allow_html=True)
-    nav_items = [
-        ("", "Chat", "chat"),
-        ("", "Search textbooks", "search"),
-        ("", "Flashcards", "flashcards"),
-        ("", "Progress", "progress"),
-        ("ℹ", "Help & setup", "help"),
-    ]
-    for icon, label, view in nav_items:
-        active = st.session_state.active_view == view
-        if st.button(f"{icon}  {label}", key=f"nav_{view}", use_container_width=True, type="primary" if active else "secondary"):
-            set_view(view)
+    st.divider()
+    # Five primary destinations: Home plus the four requested sections.
+    primary_nav = [("Home", "home"), ("Chats", "chat"), ("Books", "books"), ("Profile", "profile"), ("Study", "study")]
+    for label, target in primary_nav:
+        if st.button(label, key=f"primary_nav_{target}", use_container_width=True,
+                     type="primary" if st.session_state.active_view == target else "secondary"):
+            set_view(target)
             st.rerun()
 
-    # --------------------------------------------------------
-    # BOOKS — all textbook management lives here
-    # --------------------------------------------------------
-    st.markdown('<div class="nav-section-title"> Books</div>', unsafe_allow_html=True)
-    with st.expander(f"Your books  ·  {len(st.session_state.books)}", expanded=True):
-        uploads = st.file_uploader(
-            "Add textbooks",
-            type=["pdf", "docx", "txt", "md"],
-            accept_multiple_files=True,
-            key="textbook_uploader",
-            label_visibility="visible",
-        )
-        if uploads:
-            st.caption(f"{len(uploads)} file(s) ready to add")
-        if st.button("＋ Add & index books", key="index_textbooks", use_container_width=True, disabled=not uploads):
+    if st.session_state.active_view == "chat" or st.session_state.active_view == "chats":
+        if st.button("+ New chat", key="sidebar_new_chat", use_container_width=True):
+            new_chat()
+            st.rerun()
+        st.markdown('<div class="nav-label">Recent chats</div>', unsafe_allow_html=True)
+        chat_names = [n for n in st.session_state.chat_sessions if st.session_state.chat_sessions[n] or n == st.session_state.active_chat]
+        for chat_name in reversed(chat_names):
+            if st.button(chat_name, key=f"chat_open_{hashlib.md5(chat_name.encode()).hexdigest()}",
+                         use_container_width=True, type="primary" if chat_name == st.session_state.active_chat else "secondary"):
+                st.session_state.active_chat = chat_name
+                st.session_state.messages = st.session_state.chat_sessions[chat_name]
+                st.session_state.active_view = "chat"
+                st.rerun()
+        if st.button("Clear current chat", key="clear_chat", use_container_width=True):
+            st.session_state.chat_sessions[st.session_state.active_chat] = []
+            st.session_state.messages = st.session_state.chat_sessions[st.session_state.active_chat]
+            st.rerun()
+
+    elif st.session_state.active_view == "books":
+        st.markdown('<div class="nav-label">Textbook library</div>', unsafe_allow_html=True)
+        uploads = st.file_uploader("Add textbooks", type=["pdf", "docx", "txt", "md"], accept_multiple_files=True, key="textbook_uploader")
+        if st.button("Add and index books", key="index_textbooks", use_container_width=True, disabled=not uploads):
             try:
                 with st.spinner("Indexing textbooks..."):
                     n = index_uploads(uploads)
                     for uploaded_name, meta in list(st.session_state.books.items()):
-                        if not meta.get("db_id"): save_book_to_db(uploaded_name, meta)
+                        if not meta.get("db_id"):
+                            save_book_to_db(uploaded_name, meta)
                 st.success(f"Added {n} new book(s)." if n else "No new books added.")
                 st.rerun()
             except Exception as e:
                 st.error(f"Indexing error: {e}")
-
         if st.session_state.books:
-            st.markdown('<div class="book-list">', unsafe_allow_html=True)
             for name, meta in list(st.session_state.books.items()):
-                st.markdown(f'<div class="book-item"><div class="book-icon"></div><div class="book-info"><div class="book-name">{name}</div><div class="book-meta">{meta["pages"]} pages · {meta["chunks"]} passages</div></div></div>', unsafe_allow_html=True)
-                bc1, bc2 = st.columns(2)
-                if bc1.button("Open", key=f"open_book_{meta['hash']}", use_container_width=True):
-                    st.session_state.active_view = "chat"
+                st.markdown(f"**{name}**  ")
+                st.caption(f"{meta['pages']} pages · {meta['chunks']} passages")
+                c1, c2 = st.columns(2)
+                if c1.button("Open", key=f"open_book_{meta['hash']}", use_container_width=True):
                     st.session_state.selected_books = [name]
+                    st.session_state.active_view = "chat"
                     st.rerun()
-                if bc2.button("Delete", key=f"rm_{meta['hash']}", use_container_width=True):
+                if c2.button("Delete", key=f"rm_{meta['hash']}", use_container_width=True):
                     delete_book_from_db(meta)
                     remove_book(name)
                     st.rerun()
-            st.markdown('</div>', unsafe_allow_html=True)
         else:
-            st.caption("No books yet. Upload your school textbooks to build your private study library.")
+            st.caption("Your uploaded textbooks will appear here.")
 
-    # --------------------------------------------------------
-    # QUIZZES — history + new quiz controls live here
-    # --------------------------------------------------------
-    st.markdown('<div class="nav-section-title"> Quizzes</div>', unsafe_allow_html=True)
-    with st.expander(f"Quiz center  ·  {len(st.session_state.quiz_history)} saved", expanded=True):
-        if st.button("＋ New quiz", key="sidebar_new_quiz", use_container_width=True):
-            st.session_state.active_view = "quiz"
+    elif st.session_state.active_view == "profile":
+        st.markdown('<div class="nav-label">Student profile</div>', unsafe_allow_html=True)
+        new_name = st.text_input("Full name", value=profile_name, key="profile_name_setting")
+        new_school = st.text_input("School", value=(st.session_state.get("profile") or {}).get("school", ""), key="profile_school_setting")
+        new_class = st.text_input("Class / level", value=(st.session_state.get("profile") or {}).get("class_level", ""), key="profile_class_setting")
+        if st.button("Save profile", key="save_profile_button", use_container_width=True):
+            save_profile(new_name.strip(), new_school.strip(), new_class.strip())
+            st.success("Profile saved.")
+        st.divider()
+        with st.expander("Learning preferences"):
+            model = st.text_input("Gemini chat model", value=secret("GEMINI_MODEL", DEFAULT_LLM_MODEL) or DEFAULT_LLM_MODEL, key="hf_model_setting")
+            temperature = st.slider("Creativity", 0.0, 1.0, .35, .05, key="temperature_setting")
+            answer_length = st.selectbox("Answer length", ["Short", "Medium", "Detailed"], index=1, key="answer_length_setting")
+            teaching_level = st.selectbox("Student level", ["Beginner", "Secondary School", "Advanced"], index=1, key="teaching_level_setting")
+            subject = st.selectbox("Subject tutor", list(SUBJECTS), key="subject_setting")
+            study_mode = st.selectbox("Study mode", list(STUDY_MODES), key="study_mode_setting")
+            source_mode = st.selectbox("Knowledge mode", ["Textbook only", "Textbook + general knowledge", "Textbook + web research"], key="source_mode_setting")
+            retrieval_k = st.slider("Retrieved passages", 3, 10, 6, key="retrieval_k_setting")
+
+    elif st.session_state.active_view in {"study", "search", "quiz", "flashcards", "progress", "help"}:
+        st.markdown('<div class="nav-label">Study tools</div>', unsafe_allow_html=True)
+        study_nav = [("Search textbooks", "search"), ("Quizzes", "quiz"), ("Flashcards", "flashcards"), ("Progress", "progress"), ("Help and setup", "help")]
+        for label, target in study_nav:
+            if st.button(label, key=f"study_{target}", use_container_width=True,
+                         type="primary" if st.session_state.active_view == target else "secondary"):
+                set_view(target)
+                st.rerun()
+        if st.button("New quiz", key="sidebar_new_quiz", use_container_width=True):
             st.session_state.quiz = []
             st.session_state.quiz_submitted = False
             st.session_state.quiz_answers = []
+            st.session_state.active_view = "quiz"
             st.rerun()
-
         if st.session_state.quiz_history:
-            st.caption("Previous quizzes")
+            st.markdown('<div class="nav-label">Previous quizzes</div>', unsafe_allow_html=True)
             for i, item in enumerate(st.session_state.quiz_history[-6:][::-1]):
                 title = item.get("topic", "Untitled quiz")
                 score = item.get("score")
-                label = f"{title[:27]}" + (f"  ·  {score}%" if score is not None else "")
-                if st.button(f"  {label}", key=f"quiz_history_{i}_{item.get('id', i)}", use_container_width=True):
+                label = f"{title[:25]}" + (f" · {score}%" if score is not None else "")
+                if st.button(label, key=f"quiz_history_{i}_{item.get('id', i)}", use_container_width=True):
                     st.session_state.quiz = item.get("questions", [])
                     st.session_state.quiz_answers = item.get("answers", [])
                     st.session_state.quiz_submitted = item.get("submitted", False)
@@ -985,59 +1008,22 @@ with st.sidebar:
                     st.session_state.quiz_history_selected = item.get("id")
                     st.session_state.active_view = "quiz"
                     st.rerun()
-        else:
-            st.caption("Your completed quizzes will appear here.")
 
-    # --------------------------------------------------------
-    # CHAT HISTORY
-    # --------------------------------------------------------
-    st.markdown('<div class="nav-section-title"> Chats</div>', unsafe_allow_html=True)
-    chat_names = [n for n in st.session_state.chat_sessions.keys() if st.session_state.chat_sessions[n] or n == st.session_state.active_chat]
-    if not chat_names:
-        st.caption("No conversations yet.")
-    else:
-        for chat_name in list(reversed(chat_names)):
-            active = chat_name == st.session_state.active_chat
-            prefix = "●  " if active else "   "
-            if st.button(prefix + chat_name, key=f"chat_open_{hashlib.md5(chat_name.encode()).hexdigest()}", use_container_width=True, type="primary" if active else "secondary"):
-                st.session_state.active_chat = chat_name
-                st.session_state.messages = st.session_state.chat_sessions[chat_name]
-                st.session_state.active_view = "chat"
-                st.rerun()
-
-    if st.button("  Clear current chat", key="clear_chat", use_container_width=True):
-        st.session_state.chat_sessions[st.session_state.active_chat] = []
-        st.session_state.messages = st.session_state.chat_sessions[st.session_state.active_chat]
-        st.rerun()
-
-    # --------------------------------------------------------
-    # SETTINGS — compact, at the bottom of the sidebar
-    # --------------------------------------------------------
-    with st.expander("  Student profile", expanded=False):
-        new_name=st.text_input("Full name",value=profile_name,key="profile_name_setting")
-        new_school=st.text_input("School",value=(st.session_state.get("profile") or {}).get("school", ""),key="profile_school_setting")
-        new_class=st.text_input("Class / level",value=(st.session_state.get("profile") or {}).get("class_level", ""),key="profile_class_setting")
-        if st.button("Save profile",key="save_profile_button",use_container_width=True):
-            save_profile(new_name.strip(),new_school.strip(),new_class.strip()); st.success("Profile saved.")
-
-    with st.expander("  Settings", expanded=False):
-        model = st.text_input(
-            "Gemini chat model",
-            value=secret("GEMINI_MODEL", DEFAULT_LLM_MODEL) or DEFAULT_LLM_MODEL,
-            key="hf_model_setting",
-        )
-        temperature = st.slider("Creativity", 0.0, 1.0, .35, .05, key="temperature_setting")
-        answer_length = st.selectbox("Answer length", ["Short", "Medium", "Detailed"], index=1, key="answer_length_setting")
-        teaching_level = st.selectbox("Student level", ["Beginner", "Secondary School", "Advanced"], index=1, key="teaching_level_setting")
-        subject = st.selectbox("Subject tutor", list(SUBJECTS), key="subject_setting")
-        study_mode = st.selectbox("Study mode", list(STUDY_MODES), key="study_mode_setting")
-        source_mode = st.selectbox("Knowledge mode", ["Textbook only", "Textbook + general knowledge", "Textbook + web research"], key="source_mode_setting")
-        retrieval_k = st.slider("Retrieved passages", 3, 10, 6, key="retrieval_k_setting")
-
+    st.divider()
     if token_ready:
-        st.markdown('<div class="connection"><span class="connection-dot"></span> Study services ready</div>', unsafe_allow_html=True)
+        st.caption("Gemini connected")
     else:
-        st.markdown('<div class="connection connection-off"><span class="connection-dot"></span> Add GEMINI_API_KEY in Secrets</div>', unsafe_allow_html=True)
+        st.caption("Add GEMINI_API_KEY in Streamlit Secrets")
+
+# Safe defaults are available even when the Profile section is not open.
+model = st.session_state.get("hf_model_setting", secret("GEMINI_MODEL", DEFAULT_LLM_MODEL) or DEFAULT_LLM_MODEL)
+temperature = st.session_state.get("temperature_setting", 0.35)
+answer_length = st.session_state.get("answer_length_setting", "Medium")
+teaching_level = st.session_state.get("teaching_level_setting", "Secondary School")
+subject = st.session_state.get("subject_setting", "General")
+study_mode = st.session_state.get("study_mode_setting", "Normal Tutor")
+source_mode = st.session_state.get("source_mode_setting", "Textbook only")
+retrieval_k = st.session_state.get("retrieval_k_setting", 6)
 
 # Keep settings accessible to retrieval/chat logic.
 selected_books = st.session_state.get("selected_books", list(st.session_state.books))
@@ -1060,7 +1046,63 @@ if source_mode == "Textbook + web research" and not secret("TAVILY_API_KEY"):
 # ============================================================
 view = st.session_state.active_view
 
-if view == "chat":
+if view == "home":
+    user = current_user()
+    profile = st.session_state.get("profile") or {}
+    first_name = (profile.get("full_name") or (user.email.split("@")[0] if user and user.email else "Student")).split()[0]
+    st.title(f"Welcome back, {first_name}")
+    st.caption("Your learning overview")
+    progress = st.session_state.progress
+    accuracy = 100 * progress["quiz_correct"] / progress["quiz_total"] if progress["quiz_total"] else 0
+    total_chats = sum(1 for msgs in st.session_state.chat_sessions.values() if msgs)
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Textbooks", len(st.session_state.books))
+    m2.metric("Questions asked", progress["questions_asked"])
+    m3.metric("Quizzes completed", progress["quizzes_taken"])
+    m4.metric("Quiz accuracy", f"{accuracy:.0f}%")
+    st.subheader("Your study activity")
+    left, right = st.columns(2, gap="large")
+    with left:
+        st.markdown("**Recently studied topics**")
+        topics = dict(progress["topics"])
+        if topics:
+            st.dataframe(pd.DataFrame([{"Topic": k, "Times studied": v} for k, v in sorted(topics.items(), key=lambda x: x[1], reverse=True)[:6]]), use_container_width=True, hide_index=True)
+        else:
+            st.info("Your studied topics will appear here as you ask questions.")
+    with right:
+        st.markdown("**Recent quizzes**")
+        if st.session_state.quiz_history:
+            st.dataframe(pd.DataFrame([{"Topic": q.get("topic", "Quiz"), "Score": f"{q.get('score', 0)}%", "Date": q.get("date", "") } for q in st.session_state.quiz_history[-5:][::-1]]), use_container_width=True, hide_index=True)
+        else:
+            st.info("Your quiz results will appear here after your first quiz.")
+    st.subheader("Quick actions")
+    qa, qb, qc = st.columns(3)
+    if qa.button("Start a chat", use_container_width=True):
+        st.session_state.active_view = "chat"; st.rerun()
+    if qb.button("Open books", use_container_width=True):
+        st.session_state.active_view = "books"; st.rerun()
+    if qc.button("Study tools", use_container_width=True):
+        st.session_state.active_view = "study"; st.rerun()
+
+elif view == "books":
+    st.title("Books")
+    st.caption("Manage your textbook library from the sidebar.")
+    if not st.session_state.books:
+        st.info("No textbooks added yet. Use the Books section in the sidebar to upload your first textbook.")
+    else:
+        st.dataframe(pd.DataFrame([{"Textbook": m["name"], "Pages/sections": m["pages"], "Passages": m["chunks"], "Size (MB)": m["size_mb"]} for m in st.session_state.books.values()]), use_container_width=True, hide_index=True)
+
+elif view == "profile":
+    st.title("Profile")
+    st.caption("Manage your student details and learning preferences from the sidebar.")
+    profile = st.session_state.get("profile") or {}
+    user = current_user()
+    st.write(f"**Name:** {profile.get('full_name') or 'Student'}")
+    st.write(f"**Email:** {user.email if user else 'Not available'}")
+    st.write(f"**School:** {profile.get('school') or 'Not set'}")
+    st.write(f"**Class / level:** {profile.get('class_level') or 'Not set'}")
+
+elif view == "chat":
     # Clean ChatGPT-like conversation surface: no tabs, no study controls.
     if not st.session_state.messages:
         st.markdown('<div class="welcome"><h1></h1><h2>How can I help you study?</h2><p>Ask questions about your textbooks, request explanations, solve problems, or prepare for exams.</p></div>', unsafe_allow_html=True)
@@ -1298,26 +1340,28 @@ st.markdown("""
 <style>
 /* Overall ChatGPT-like dark workspace with subtle study-themed backgrounds */
 .stApp{
-  background-color:#101114;
+  background-color:#f8fafc;
   background-image:
-    linear-gradient(rgba(15,16,20,.91),rgba(15,16,20,.94)),
+    linear-gradient(rgba(248,250,252,.94),rgba(248,250,252,.97)),
     url("https://images.unsplash.com/photo-1455390582262-044c596d4f4e?auto=format&fit=crop&w=2200&q=85");
   background-size:cover;
   background-position:center;
   background-attachment:fixed;
 }
-.block-container{max-width:1050px;padding-top:1.6rem;padding-bottom:7.5rem}
+.block-container{max-width:1180px;padding-top:1.6rem;padding-bottom:7.5rem;padding-left:clamp(1rem,3vw,3rem);padding-right:clamp(1rem,3vw,3rem)}
+section[data-testid="stSidebar"]{width:clamp(260px,24vw,340px)!important;min-width:clamp(260px,24vw,340px)!important}
+@media(min-width:1100px){.block-container{max-width:1180px}}
 [data-testid="stSidebar"]{
-  border-right:1px solid rgba(255,255,255,.10);
-  background-image:linear-gradient(rgba(20,21,27,.94),rgba(20,21,27,.97)),url("https://images.unsplash.com/photo-1507842217343-583bb7270b66?auto=format&fit=crop&w=900&q=80");
+  border-right:1px solid #e2e8f0;
+  background:#f1f5f9;
   background-size:cover;background-position:center;
 }
 [data-testid="stSidebar"]>div:first-child{padding:.7rem .55rem 1rem}
 [data-testid="stSidebar"] .block-container{padding:0}
 [data-testid="stSidebar"] hr{margin:.65rem .35rem;border-color:rgba(255,255,255,.08)}
-[data-testid="stSidebar"] .stButton>button{width:100%;border:0;border-radius:9px;background:transparent;text-align:left;min-height:2.35rem;padding:.48rem .65rem;font-weight:450;color:inherit;box-shadow:none}
-[data-testid="stSidebar"] .stButton>button:hover{background:rgba(255,255,255,.08)}
-[data-testid="stSidebar"] .stButton>button[kind="primary"]{background:rgba(255,255,255,.10)}
+[data-testid="stSidebar"] .stButton>button{width:100%;border:0;border-radius:9px;background:transparent;text-align:left;min-height:2.35rem;padding:.48rem .65rem;font-weight:450;color:#334155;box-shadow:none}
+[data-testid="stSidebar"] .stButton>button:hover{background:#e2e8f0}
+[data-testid="stSidebar"] .stButton>button[kind="primary"]{background:#dbeafe}
 [data-testid="stSidebar"] .stButton>button[kind="primary"]:hover{background:rgba(255,255,255,.13)}
 [data-testid="stSidebar"] .stExpander{border:0;background:transparent}
 [data-testid="stSidebar"] [data-testid="stExpanderDetails"]{padding:.35rem .25rem .55rem}
@@ -1331,22 +1375,22 @@ st.markdown("""
 .student-account{display:flex;align-items:center;gap:.55rem;margin:.15rem .35rem .7rem;padding:.55rem .55rem;border-radius:10px;background:rgba(255,255,255,.045)}
 .student-avatar{width:30px;height:30px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:#2f6feb;color:white;font-weight:700;font-size:.78rem}.student-name{font-size:.78rem;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:155px}.student-email{font-size:.62rem;opacity:.45;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:155px}
 .nav-label{font-size:.7rem;font-weight:650;opacity:.45;text-transform:uppercase;letter-spacing:.08em;padding:.35rem .65rem .25rem}
-.nav-section-title{font-size:.86rem;font-weight:650;padding:.85rem .65rem .35rem;color:rgba(255,255,255,.82)}
+.nav-section-title{font-size:.86rem;font-weight:650;padding:.85rem .65rem .35rem;color:#334155}
 .book-item{display:flex;align-items:center;gap:.55rem;padding:.45rem .25rem}
-.book-icon{width:29px;height:29px;border-radius:7px;background:rgba(255,255,255,.08);display:flex;align-items:center;justify-content:center}
+.book-icon{width:29px;height:29px;border-radius:7px;background:#e2e8f0;display:flex;align-items:center;justify-content:center}
 .book-info{min-width:0}.book-name{font-size:.77rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.book-meta{font-size:.64rem;opacity:.45;margin-top:.08rem}
 .connection{margin:.75rem .35rem .2rem;padding:.45rem .6rem;border-radius:8px;background:rgba(46,204,113,.10);color:#7ee2a8;font-size:.7rem;display:flex;align-items:center;gap:.45rem}
 .connection-off{background:rgba(243,156,18,.10);color:#f3c36b}
 .connection-dot{width:7px;height:7px;border-radius:50%;background:#36d77f;display:inline-block;box-shadow:0 0 0 3px rgba(54,215,127,.10)}
 .connection-off .connection-dot{background:#f0a52c}
 /* Main welcome */
-.welcome{text-align:center;margin:18vh auto 2rem;max-width:650px;padding:2.1rem 1.5rem;border:1px solid rgba(255,255,255,.10);border-radius:26px;background:linear-gradient(135deg,rgba(17,20,28,.86),rgba(26,29,39,.76)),url("https://images.unsplash.com/photo-1516321318423-f06f85e504b3?auto=format&fit=crop&w=1400&q=80");background-size:cover;background-position:center;box-shadow:0 18px 55px rgba(0,0,0,.18)}.welcome h1{font-size:2.2rem;margin:0}.welcome h2{font-size:1.8rem;margin:.35rem 0}.welcome p{opacity:.72;font-size:1rem}
+.welcome{text-align:center;margin:18vh auto 2rem;max-width:650px;padding:2.1rem 1.5rem;border:1px solid rgba(255,255,255,.10);border-radius:26px;background:linear-gradient(135deg,rgba(255,255,255,.92),rgba(241,245,249,.88)),url("https://images.unsplash.com/photo-1516321318423-f06f85e504b3?auto=format&fit=crop&w=1400&q=80");background-size:cover;background-position:center;box-shadow:0 18px 55px rgba(0,0,0,.18)}.welcome h1{font-size:2.2rem;margin:0}.welcome h2{font-size:1.8rem;margin:.35rem 0}.welcome p{opacity:.72;font-size:1rem}
 .source-card{border:1px solid rgba(128,128,128,.18);border-radius:12px;padding:.75rem;margin:.35rem 0;background:rgba(128,128,128,.04)}
 .small-muted{opacity:.7;font-size:.88rem}
 [data-testid="stChatMessage"]{border:0;background:transparent;padding:.2rem 0;margin-bottom:.75rem}
 /* Fixed bottom composer */
 [data-testid="stChatInput"]{position:fixed!important;left:calc(50% - min(525px, 45vw))!important;right:auto!important;width:min(1050px, 90vw)!important;bottom:1rem!important;z-index:999!important;padding:0!important;background:transparent!important}
-[data-testid="stChatInput"]>div{border-radius:20px!important;border:1px solid rgba(255,255,255,.12)!important;background:#212121!important;box-shadow:0 8px 30px rgba(0,0,0,.35)!important}
+[data-testid="stChatInput"]>div{border-radius:20px!important;border:1px solid #cbd5e1!important;background:#ffffff!important;box-shadow:0 8px 30px rgba(0,0,0,.35)!important}
 [data-testid="stChatInput"] textarea{min-height:50px!important;max-height:180px!important;padding:14px 58px 14px 16px!important;font-size:.96rem!important}
 [data-testid="stChatInput"] button{border-radius:12px!important}
 </style>
