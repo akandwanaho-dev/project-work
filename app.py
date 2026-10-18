@@ -1092,7 +1092,7 @@ with st.sidebar:
                 if meta.get("persisted_only"):
                     st.warning("File is saved as metadata only or could not be restored. Re-upload it to search it.")
                 c1, c2 = st.columns(2)
-                if c1.button("Open", key=f"open_book_{meta['hash']}", use_container_width=True):
+                book_hash = meta.get("hash") or meta.get("file_hash") or meta.get("id") or meta.get("title", "unknown")  if c1.button(     "Open",     key=f"open_book_{book_hash}",     use_container_width=True ):
                     st.session_state.selected_books = [name]
                     st.session_state.active_view = "chat"
                     st.rerun()
