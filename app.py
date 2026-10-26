@@ -1628,5 +1628,128 @@ section[data-testid="stSidebar"]{width:clamp(260px,24vw,340px)!important;min-wid
 @media(max-width:760px){[data-testid="stChatInput"]{left:1rem!important;right:1rem!important;width:auto!important}}
 [data-testid="stChatInput"] textarea{min-height:50px!important;max-height:180px!important;padding:14px 58px 14px 16px!important;font-size:.96rem!important}
 [data-testid="stChatInput"] button{border-radius:12px!important}
+
+/* ==========================================================
+   izy read colour system — calm, consistent, accessible
+   ========================================================== */
+:root {
+  --izy-navy: #173B67;
+  --izy-blue: #3478D4;
+  --izy-blue-hover: #285FAE;
+  --izy-blue-soft: #EAF2FC;
+  --izy-border-light: #DCE4EF;
+  --izy-text-light: #172033;
+  --izy-muted-light: #5F6B7C;
+}
+/* Light theme */
+[data-testid="stAppViewContainer"] [data-theme="light"],
+[data-theme="light"] {
+  --izy-page: #F5F7FA;
+  --izy-surface: #FFFFFF;
+  --izy-surface-soft: #EEF3F9;
+  --izy-border: #DCE4EF;
+  --izy-text: #172033;
+  --izy-muted: #5F6B7C;
+}
+[data-testid="stAppViewContainer"] {
+  color: var(--text-color);
+}
+[data-testid="stAppViewContainer"] .main {
+  background: var(--background-color);
+}
+[data-testid="stSidebar"] {
+  border-right: 1px solid var(--izy-border, rgba(128,128,128,.18)) !important;
+}
+[data-testid="stSidebar"] > div:first-child {
+  background: var(--secondary-background-color);
+}
+[data-testid="stSidebar"] .stButton > button {
+  border: 1px solid var(--izy-border, rgba(128,128,128,.18)) !important;
+  background: transparent !important;
+  color: var(--text-color) !important;
+  transition: background .18s ease, border-color .18s ease, transform .18s ease;
+}
+[data-testid="stSidebar"] .stButton > button:hover {
+  border-color: var(--izy-blue) !important;
+  background: rgba(52,120,212,.09) !important;
+}
+[data-testid="stSidebar"] .stButton > button[kind="primary"],
+.stButton > button[kind="primary"],
+button[kind="primary"] {
+  background: var(--izy-blue) !important;
+  border-color: var(--izy-blue) !important;
+  color: #FFFFFF !important;
+}
+[data-testid="stSidebar"] .stButton > button[kind="primary"]:hover,
+.stButton > button[kind="primary"]:hover {
+  background: var(--izy-blue-hover) !important;
+  border-color: var(--izy-blue-hover) !important;
+}
+[data-testid="stMetric"],
+[data-testid="stExpander"],
+[data-testid="stChatInput"] > div,
+[data-testid="stTextInput"] input,
+[data-testid="stTextArea"] textarea,
+[data-testid="stNumberInput"] input,
+[data-testid="stSelectbox"] [data-baseweb="select"] > div,
+[data-testid="stMultiSelect"] [data-baseweb="select"] > div {
+  border-color: var(--izy-border, rgba(128,128,128,.22)) !important;
+}
+[data-testid="stMetric"] {
+  background: var(--secondary-background-color) !important;
+  border-radius: 14px !important;
+}
+[data-testid="stChatInput"] > div {
+  box-shadow: 0 8px 26px rgba(23,59,103,.10) !important;
+}
+[data-testid="stChatInput"] > div:focus-within,
+[data-testid="stTextInput"] input:focus,
+[data-testid="stTextArea"] textarea:focus {
+  border-color: var(--izy-blue) !important;
+  box-shadow: 0 0 0 1px var(--izy-blue) !important;
+}
+.hero {
+  background: linear-gradient(135deg, rgba(52,120,212,.12), rgba(23,59,103,.035)) !important;
+  border-color: var(--izy-border, rgba(128,128,128,.18)) !important;
+  box-shadow: 0 12px 32px rgba(23,59,103,.06) !important;
+}
+.source-card {
+  background: var(--secondary-background-color) !important;
+  border-color: var(--izy-border, rgba(128,128,128,.18)) !important;
+}
+[data-testid="stChatMessage"] {
+  border-color: var(--izy-border, rgba(128,128,128,.14)) !important;
+}
+a { color: var(--izy-blue); }
+.stProgress > div > div > div > div {
+  background-color: var(--izy-blue) !important;
+}
+/* Dark theme: keep contrast without neon accents */
+[data-theme="dark"] {
+  --izy-page: #111827;
+  --izy-surface: #1F2937;
+  --izy-surface-soft: #273449;
+  --izy-border: #374151;
+  --izy-text: #F3F4F6;
+  --izy-muted: #AAB4C3;
+  --izy-blue: #60A5FA;
+  --izy-blue-hover: #3B82F6;
+}
+[data-theme="dark"] [data-testid="stSidebar"] .stButton > button:hover {
+  background: rgba(96,165,250,.12) !important;
+}
+[data-theme="dark"] .hero {
+  background: linear-gradient(135deg, rgba(96,165,250,.15), rgba(31,41,55,.72)) !important;
+  border-color: #374151 !important;
+}
+[data-theme="dark"] [data-testid="stMetric"],
+[data-theme="dark"] .source-card {
+  background: #1F2937 !important;
+  border-color: #374151 !important;
+}
+@media (max-width: 760px) {
+  .hero { padding: 1.2rem !important; border-radius: 18px !important; }
+}
+
 </style>
 """, unsafe_allow_html=True)
