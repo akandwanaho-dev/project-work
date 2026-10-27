@@ -1,13 +1,15 @@
 import io
+import base64
 import os
 import re
 import json
+from html import escape as html_escape
 import hashlib
+import time
 from collections import defaultdict
 from datetime import datetime
 from types import SimpleNamespace
 
-import pandas as pd
 import requests
 import streamlit as st
 from supabase import create_client
@@ -245,11 +247,7 @@ def load_user_data(sb, user_id):
                     if raw:
                         upload = SimpleNamespace(name=name, getvalue=lambda raw=raw: raw)
                         _, parsed_name, raw_docs = raw_docs_from_upload(upload)
-                        splitter = RecursiveCharacterTextSplitter(
-                            chunk_size=1100, chunk_overlap=180,
-                            separators=["\\n\\n", "\\n", ". ", " ", ""],
-                        )
-                        chunks = splitter.split_documents(raw_docs)
+                        chunks = split_textbook_documents(raw_docs)
                         for i, doc in enumerate(chunks):
                             doc.metadata["hash"] = meta["hash"]
                             doc.metadata["chunk_id"] = f'{meta["hash"][:12]}-{i}'
@@ -581,6 +579,31 @@ def clean(text: str) -> str:
     return text.strip()
 
 
+def split_textbook_documents(raw_docs, chunk_size=1100, chunk_overlap=180):
+    """Split extracted textbook sections into overlapping, searchable chunks.
+
+    Separators are real newline characters (not the literal backslash+n text).
+    Metadata from each source page/section is retained on every resulting chunk.
+    Empty or whitespace-only sections are ignored.
+    """
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        separators=["\n\n", "\n", ". ", " ", ""],
+        length_function=len,
+        keep_separator=True,
+        add_start_index=True,
+    )
+    usable_docs = [
+        Document(page_content=clean(doc.page_content), metadata=dict(doc.metadata or {}))
+        for doc in (raw_docs or [])
+        if doc and clean(getattr(doc, "page_content", ""))
+    ]
+    if not usable_docs:
+        return []
+    return [chunk for chunk in splitter.split_documents(usable_docs) if chunk.page_content.strip()]
+
+
 def safe_name(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9._ -]", "_", name).strip()
 
@@ -676,8 +699,7 @@ def index_uploads(files):
             continue
         if not raw_docs or not any((doc.page_content or "").strip() for doc in raw_docs):
             raise ValueError(f"No readable text was extracted from {name}. If it is a scanned PDF, run OCR and upload a searchable PDF.")
-        splitter = RecursiveCharacterTextSplitter(chunk_size=1100, chunk_overlap=180, separators=["\n\n", "\n", ". ", " ", ""])
-        chunks = splitter.split_documents(raw_docs)
+        chunks = split_textbook_documents(raw_docs)
         for i, d in enumerate(chunks):
             d.metadata["hash"] = h
             d.metadata["chunk_id"] = f"{h[:12]}-{i}"
@@ -705,15 +727,49 @@ def remove_book(name):
     rebuild_index()
 
 
+def render_static_table(rows):
+    """Render a small table as HTML instead of Streamlit's JS-backed DataFrame.
+
+    This avoids the dynamically imported DataFrame frontend bundle that was
+    failing on the deployed Home/Books/Study views. Values are HTML-escaped.
+    """
+    if hasattr(rows, "to_dict"):
+        rows = rows.to_dict(orient="records")
+    rows = list(rows or [])
+    if not rows:
+        st.caption("Nothing to show yet.")
+        return
+    columns = list(dict.fromkeys(key for row in rows for key in row.keys()))
+    head = "".join(f"<th>{html_escape(str(col))}</th>" for col in columns)
+    body_rows = []
+    for row in rows:
+        cells = "".join(
+            f"<td>{html_escape(str(row.get(col, '')))}</td>" for col in columns
+        )
+        body_rows.append(f"<tr>{cells}</tr>")
+    table_html = (
+        '<div style="width:100%;overflow-x:auto;border:1px solid var(--izy-border, #DCE4EF);'
+        'border-radius:10px;margin:.35rem 0 1rem">'
+        '<table style="width:100%;border-collapse:collapse;font-size:.9rem">'
+        f'<thead><tr>{head}</tr></thead><tbody>{"".join(body_rows)}</tbody>'
+        '</table></div>'
+        '<style>table th,table td{padding:.65rem .8rem;text-align:left;'
+        'border-bottom:1px solid var(--izy-border, #DCE4EF)}'
+        'table th{font-weight:650;background:var(--secondary-background-color)}'
+        'table tr:last-child td{border-bottom:0}</style>'
+    )
+    st.markdown(table_html, unsafe_allow_html=True)
+
+
 def gemini_api_key():
     return secret("GEMINI_API_KEY")
 
 
 def ask_model(messages, model, temperature=.35, max_tokens=900):
-    """Generate a response with the Gemini API, preserving chat history."""
+    """Generate a response with Gemini, retrying temporary service/rate-limit errors."""
     api_key = gemini_api_key()
     if not api_key:
-        raise RuntimeError("GEMINI_API_KEY is missing. Add it to Streamlit Cloud Secrets.")
+        raise RuntimeError("GEMINI_API_KEY is missing. Add it to Streamlit Cloud → Settings → Secrets.")
 
     system_parts = []
     contents = []
@@ -721,7 +777,7 @@ def ask_model(messages, model, temperature=.35, max_tokens=900):
         role = str(message.get("role", "user")).lower()
         content = message.get("content", "")
         if isinstance(content, list):
-            content = "\\n".join(str(part.get("text", "")) if isinstance(part, dict) else str(part) for part in content)
+            content = "\n".join(str(part.get("text", "")) if isinstance(part, dict) else str(part) for part in content)
         content = str(content or "").strip()
         if role == "system":
             if content:
@@ -733,53 +789,60 @@ def ask_model(messages, model, temperature=.35, max_tokens=900):
             encoded = image_item.get("data", "")
             if encoded:
                 parts.append({"inlineData": {"mimeType": mime_type, "data": encoded}})
-        if not parts:
-            continue
-        contents.append({
-            "role": "model" if role in ("assistant", "model") else "user",
-            "parts": parts,
-        })
+        if parts:
+            contents.append({"role": "model" if role in ("assistant", "model") else "user", "parts": parts})
 
     if not contents:
         raise RuntimeError("There is no user message to send to Gemini.")
 
     payload = {
         "contents": contents,
-        "generationConfig": {
-            "temperature": float(temperature),
-            "maxOutputTokens": int(max_tokens),
-        },
+        "generationConfig": {"temperature": float(temperature), "maxOutputTokens": int(max_tokens)},
     }
     if system_parts:
         payload["systemInstruction"] = {"parts": [{"text": "\n\n".join(system_parts)}]}
 
     model_name = (model or DEFAULT_LLM_MODEL).strip()
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
-    try:
-        response = requests.post(
-            url,
-            headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
-            json=payload,
-            timeout=90,
-        )
-        if not response.ok:
-            detail = ""
+    last_error = None
+    # Gemini can temporarily return 429/500/502/503/504 during capacity spikes.
+    for attempt in range(3):
+        try:
+            response = requests.post(
+                url,
+                headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+                json=payload,
+                timeout=90,
+            )
+            if response.ok:
+                data = response.json()
+                candidates = data.get("candidates", [])
+                if not candidates:
+                    feedback = data.get("promptFeedback", {})
+                    raise RuntimeError(f"Gemini returned no answer. {feedback.get('blockReason', 'Try rephrasing your question.')}")
+                parts = candidates[0].get("content", {}).get("parts", [])
+                answer = "\n".join(part.get("text", "") for part in parts if part.get("text"))
+                if not answer.strip():
+                    raise RuntimeError("Gemini returned an empty answer. Try again.")
+                return answer.strip()
+
             try:
                 detail = response.json().get("error", {}).get("message", "")
             except Exception:
                 detail = response.text[:300]
-            raise RuntimeError(f"Gemini API error ({response.status_code}): {detail or 'Request failed.'}")
-        data = response.json()
-        candidates = data.get("candidates", [])
-        if not candidates:
-            raise RuntimeError("Gemini returned no answer. Try rephrasing your question.")
-        parts = candidates[0].get("content", {}).get("parts", [])
-        answer = "\n".join(part.get("text", "") for part in parts if part.get("text"))
-        if not answer.strip():
-            raise RuntimeError("Gemini returned an empty answer. Try again.")
-        return answer.strip()
-    except requests.RequestException as exc:
-        raise RuntimeError(f"Could not connect to Gemini API: {exc}") from exc
+            last_error = f"Gemini API error ({response.status_code}): {detail or 'Request failed.'}"
+            if response.status_code not in (429, 500, 502, 503, 504) or attempt == 2:
+                break
+            time.sleep(1.5 * (attempt + 1))
+        except requests.RequestException as exc:
+            last_error = f"Could not connect to Gemini API: {exc}"
+            if attempt == 2:
+                break
+            time.sleep(1.5 * (attempt + 1))
+
+    if last_error and any(code in last_error for code in ("429", "500", "502", "503", "504")):
+        raise RuntimeError(last_error + "\n\nGemini is temporarily busy or rate-limited. Wait a minute and retry, or check your Google AI Studio quota and billing.")
+    raise RuntimeError(last_error or "Gemini request failed. Please try again.")
 
 
 def retrieve(query, selected_books, selected_chapters, k=6):
@@ -1280,13 +1343,13 @@ if view == "home":
         st.markdown("**Recently studied topics**")
         topics = dict(progress["topics"])
         if topics:
-            st.dataframe(pd.DataFrame([{"Topic": k, "Times studied": v} for k, v in sorted(topics.items(), key=lambda x: x[1], reverse=True)[:6]]), use_container_width=True, hide_index=True)
+            render_static_table([{"Topic": k, "Times studied": v} for k, v in sorted(topics.items(), key=lambda x: x[1], reverse=True)[:6]])
         else:
             st.info("Your studied topics will appear here as you ask questions.")
     with right:
         st.markdown("**Recent quizzes**")
         if st.session_state.quiz_history:
-            st.dataframe(pd.DataFrame([{"Topic": q.get("topic", "Quiz"), "Score": f"{q.get('score', 0)}%", "Date": q.get("date", "") } for q in st.session_state.quiz_history[-5:][::-1]]), use_container_width=True, hide_index=True)
+            render_static_table([{"Topic": q.get("topic", "Quiz"), "Score": f"{q.get('score', 0)}%", "Date": q.get("date", "")} for q in st.session_state.quiz_history[-5:][::-1]])
         else:
             st.info("Your quiz results will appear here after your first quiz.")
     st.subheader("Quick actions")
@@ -1304,7 +1367,7 @@ elif view == "books":
     if not st.session_state.books:
         st.info("No textbooks added yet. Use the Books section in the sidebar to upload your first textbook.")
     else:
-        st.dataframe(pd.DataFrame([{"Textbook": m["name"], "Pages/sections": m["pages"], "Passages": m["chunks"], "Size (MB)": m["size_mb"]} for m in st.session_state.books.values()]), use_container_width=True, hide_index=True)
+        render_static_table([{"Textbook": m.get("name", "Untitled"), "Pages/sections": m.get("pages", 0), "Passages": m.get("chunks", 0), "Size (MB)": m.get("size_mb", 0)} for m in st.session_state.books.values()])
 
 elif view == "profile":
     st.title("Profile")
@@ -1537,16 +1600,16 @@ elif view == "progress":
     d.metric("Textbooks", len(st.session_state.books))
     if st.session_state.books:
         rows = [{"Textbook": m["name"], "Pages/sections": m["pages"], "Chunks": m["chunks"], "Size (MB)": m["size_mb"]} for m in st.session_state.books.values()]
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        render_static_table(rows)
     if st.session_state.quiz_history:
         st.subheader("Quiz history")
         rows = [{"Topic": x["topic"], "Score": f"{x['score']}%", "Date": x["date"]} for x in st.session_state.quiz_history[::-1]]
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        render_static_table(rows)
     topics = dict(p["topics"])
     if topics:
         st.subheader("Most studied topics")
         rows = [{"Question/topic": k, "Times studied": v} for k, v in sorted(topics.items(), key=lambda x: x[1], reverse=True)[:10]]
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        render_static_table(rows)
 
 elif view == "help":
     st.title("ℹ Help & setup")
